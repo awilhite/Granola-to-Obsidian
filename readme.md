@@ -29,8 +29,10 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **✨ Rich Metadata**: Includes frontmatter with creation/update dates and Granola IDs
 - **🧩 Metadata Mapping**: Map Granola's inline metadata block into frontmatter fields like `org`, `people`, `topics`, and `meeting_type`
 - **🔗 Metadata Templates**: Format mapped org and people values with templates such as `[[Reference/{name}]]`
+- **✅ Review Task**: Optionally add a review task near the top of each synced meeting note
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
 - **📄 Separate Transcript Notes**: Store transcripts in their own notes instead of embedding them inline
+- **🧪 Granola Template Management**: Automatically ensure a selected Granola template exists before sync using private Granola APIs
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
 - **⚙️ Customizable Filename Separators**: Choose how words are separated in filenames (underscore, dash, or no separator)
@@ -63,11 +65,11 @@ Choose which folder in your vault to sync notes to (default: `Granola`)
 Optional prefix to add to all synced note filenames (e.g., `meeting-`, `granola-`)
 
 ### Auth Key Path
-Path to your Granola authentication file. Default locations:
+Path to your fallback Granola authentication file. Default locations:
 - **macOS**: `Users/USERNAME/Library/Application Support/Granola/supabase.json`
 - **Windows**: `AppData/Roaming/Granola/supabase.json`
 
-The plugin automatically detects your operating system and sets the appropriate default path.
+The plugin automatically detects your operating system and sets the appropriate default path. For newer Granola installs, the plugin will also automatically check `stored-accounts.json` first when available.
 
 ### Filename Template
 Customize how your notes are named using these variables:
@@ -181,6 +183,37 @@ Control whether meeting transcripts stay inline or live in their own notes.
 - **Reference separation**: Store verbose transcript material separately from the primary note
 - **Flexible organization**: Place transcript notes in their own archival folder
 
+### Review Task
+
+Optionally insert a lightweight review task near the top of each synced summary note.
+
+#### Setting:
+- **Add Review Task to Synced Notes**: Insert `- [ ] Review imported Granola note` below the title
+
+#### Behavior:
+- New synced notes get the unchecked review task when enabled
+- If a note is later fully re-synced, the task is inserted again and reset to unchecked
+- This is a reminder only; it does not stop future syncs
+
+### 🧪 Granola Template Management
+
+Automatically ensure a selected Granola template exists in Granola before the plugin decides whether a note needs to be updated in Obsidian.
+
+#### Settings:
+- **Enable Granola Template Management**: Turn the feature on for both manual and auto sync
+- **Granola Template**: Select the Granola template to enforce before sync
+
+#### Behavior:
+- The plugin checks whether the selected template already exists on each Granola note
+- If the selected template is missing, the plugin generates it in Granola first and then continues normal sync
+- If the selected template already exists, the plugin leaves it alone
+- If template management fails, the plugin logs the failure and continues syncing the note with whatever Granola content is currently available
+
+#### Notes:
+- This feature is experimental and fork-specific
+- It uses private Granola APIs and may break if Granola changes their internal endpoints
+- It is designed to recover richer summary output automatically, especially when a note was initially created without your preferred template
+
 ### Auto-Sync Frequency
 Choose how often to automatically sync:
 - Never (manual only)
@@ -225,6 +258,7 @@ Set your preferred frequency in settings and the plugin will sync automatically 
 - **"Granola Sync: Idle"** - Ready to sync
 - **"Granola Sync: Syncing..."** - Currently syncing (with animation)
 - **"Granola Sync: X notes synced"** - Success (shows for 3 seconds)
+- **"Granola Sync: X notes synced, Y template-updated"** - Success with template-management activity summary
 - **"Granola Sync: Error - [details]"** - Error occurred (shows for 5 seconds)
 
 ### Find Duplicate Granola Notes
