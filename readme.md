@@ -27,7 +27,10 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🔧 Smart Filtering**: Exclude your own name from attendee tags with configurable settings
 - **🛡️ Preserve Manual Additions**: Option to skip updating existing notes, preserving your tags, summaries, and custom properties
 - **✨ Rich Metadata**: Includes frontmatter with creation/update dates and Granola IDs
+- **🧩 Metadata Mapping**: Map Granola's inline metadata block into frontmatter fields like `org`, `people`, `topics`, and `meeting_type`
+- **🔗 Metadata Templates**: Format mapped org and people values with templates such as `[[Reference/{name}]]`
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
+- **📄 Separate Transcript Notes**: Store transcripts in their own notes instead of embedding them inline
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
 - **⚙️ Customizable Filename Separators**: Choose how words are separated in filenames (underscore, dash, or no separator)
@@ -142,6 +145,41 @@ granola_url: "https://notes.granola.ai/d/abc123def456"
 - **Cross-platform**: Works with both desktop and web versions of Granola
 - **Always current**: URL automatically generated from document ID
 - **Non-intrusive**: Appears cleanly in frontmatter without cluttering note content
+
+### Metadata Mapping
+
+Map Granola's inline `### Metadata` block into structured frontmatter fields for richer note organization.
+
+#### Settings:
+- **Map Metadata to Frontmatter**: Extract metadata fields like `org`, `people`, `topics`, `loc`, and `meeting_type`
+- **Remove Metadata Section from Body**: Remove the inline metadata block once it has been promoted into frontmatter
+- **Mapped Org Template**: Format the mapped `org` value using `{name}`, `{value}`, or `{slug}`
+- **Mapped People Template**: Format each mapped `people` value using `{name}`, `{value}`, or `{slug}`
+
+#### Template examples:
+- `{name}` -> `Mesh Systems`
+- `[[Organizations/{name}]]` -> `[[Organizations/Mesh Systems]]`
+- `[[People/{name}]]` -> `[[People/Austin Wilhite]]`
+- `[[people/{slug}]]` -> `[[people/austin-wilhite]]`
+
+#### Benefits:
+- **Structured properties**: Turn machine-generated metadata into first-class Obsidian properties
+- **Reference-friendly**: Point `org` and `people` directly at linked reference notes
+- **Cleaner note bodies**: Remove the raw metadata JSON block after extraction
+
+### Transcript Options
+
+Control whether meeting transcripts stay inline or live in their own notes.
+
+#### Settings:
+- **Include Full Transcript**: Embed the transcript directly in the synced meeting note
+- **Store Transcript in Separate Note**: Save the transcript as its own note and link to it from the main meeting note
+- **Transcript Directory**: Choose where separate transcript notes are stored
+
+#### Benefits:
+- **Cleaner main notes**: Keep summaries and action items focused
+- **Reference separation**: Store verbose transcript material separately from the primary note
+- **Flexible organization**: Place transcript notes in their own archival folder
 
 ### Auto-Sync Frequency
 Choose how often to automatically sync:
@@ -355,6 +393,13 @@ title: "Team Standup Meeting"
 granola_url: "https://notes.granola.ai/d/abc123def456"
 created_at: 2025-06-06T14:30:00.000Z
 updated_at: 2025-06-06T15:45:00.000Z
+org: "[[Organizations/Acme]]"
+people:
+  - "[[People/John Smith]]"
+  - "[[People/Sarah Jones]]"
+topics:
+  - "delivery planning"
+  - "customer kickoff"
 tags:
   - people/john-smith
   - people/sarah-jones

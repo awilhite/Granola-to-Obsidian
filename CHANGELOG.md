@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Added
+- **🧩 Metadata-to-Frontmatter Mapping**: Optionally extract Granola's inline metadata block and map fields like `org`, `people`, `topics`, `loc`, and `meeting_type` into note frontmatter
+- **🔗 Metadata Value Templates**: New `Mapped org template` and `Mapped people template` settings to format mapped values with placeholders like `{name}` and `{slug}`
+- **🧹 Metadata Cleanup**: Optional setting to remove the inline `### Metadata` block from the note body after mapping it into frontmatter
+- **📄 Separate Transcript Notes**: Optionally store transcripts in their own notes with a link back from the main meeting note
+
 ## [1.9.3] - 2026-02-15
 ### Changed
 - **Plugin ID renamed**: Changed plugin ID from `granola-sync` to `granola-sync-plus` for community plugin catalog submission (existing ID was already taken)

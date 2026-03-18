@@ -57,6 +57,8 @@ const DEFAULT_SETTINGS = {
 	additionalFrontmatter: '', // Additional frontmatter lines (key: value, one per line)
 	mapMetadataToFrontmatter: false, // Map Granola metadata block fields into frontmatter
 	removeMetadataSectionFromBody: false, // Remove the inline metadata section after mapping it
+	metadataOrgTemplate: '{name}', // Template for mapped org frontmatter values
+	metadataPersonTemplate: '{name}', // Template for mapped people frontmatter values
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -818,6 +820,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	escapeYamlString(value) {
 		return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+	}
+
+	slugifyTemplateValue(value) {
+		return String(value)
+			.replace(/[^\w\s-]/g, '')
+			.trim()
+			.replace(/\s+/g, '-')
+			.toLowerCase();
+	}
+
+	applyMetadataValueTemplate(template, value) {
+		if (value === null || value === undefined || value === '') {
+			return '';
+		}
+
+		const stringValue = String(value).trim();
+		if (!stringValue) {
+			return '';
+		}
+
+		const resolvedTemplate = template && template.trim() ? template : '{name}';
+		return resolvedTemplate
+			.replace(/{name}/g, stringValue)
+			.replace(/{value}/g, stringValue)
+			.replace(/{slug}/g, this.slugifyTemplateValue(stringValue));
 	}
 
 	formatFrontmatterList(key, values) {
@@ -2115,10 +2142,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			if (metadata && typeof metadata === 'object') {
 				if (metadata.org && !additionalFrontmatterKeys.has('org')) {
-					frontmatter += 'org: ' + this.escapeYamlString(metadata.org) + '\n';
+					const mappedOrg = this.applyMetadataValueTemplate(this.settings.metadataOrgTemplate, metadata.org);
+					if (mappedOrg) {
+						frontmatter += 'org: ' + this.escapeYamlString(mappedOrg) + '\n';
+					}
 				}
 				if (!additionalFrontmatterKeys.has('people')) {
-					frontmatter += this.formatFrontmatterList('people', metadata.people);
+					const mappedPeople = Array.isArray(metadata.people)
+						? [...new Set(metadata.people
+							.map((person) => this.applyMetadataValueTemplate(this.settings.metadataPersonTemplate, person))
+							.filter(Boolean))]
+						: metadata.people;
+					frontmatter += this.formatFrontmatterList('people', mappedPeople);
 				}
 				if (!additionalFrontmatterKeys.has('topics')) {
 					frontmatter += this.formatFrontmatterList('topics', metadata.topics);
@@ -2768,6 +2803,38 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				toggle.setDisabled(!this.plugin.settings.mapMetadataToFrontmatter);
 				toggle.onChange(async (value) => {
 					this.plugin.settings.removeMetadataSectionFromBody = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Mapped org template')
+			.setDesc('Customize mapped org values. Use {name} for the original value and {slug} for a lowercase hyphenated version. Example: "[[Organizations/{name}]]"')
+			.addText(text => {
+				text.setPlaceholder('{name}');
+				text.setValue(this.plugin.settings.metadataOrgTemplate);
+				text.setDisabled(!this.plugin.settings.mapMetadataToFrontmatter);
+				text.onChange(async (value) => {
+					if (value && !value.includes('{name}') && !value.includes('{value}') && !value.includes('{slug}')) {
+						new obsidian.Notice('Warning: Org template should include {name}, {value}, or {slug}');
+					}
+					this.plugin.settings.metadataOrgTemplate = value || '{name}';
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Mapped people template')
+			.setDesc('Customize each mapped people value. Use {name} for the original value and {slug} for a lowercase hyphenated version. Example: "[[People/{name}]]"')
+			.addText(text => {
+				text.setPlaceholder('{name}');
+				text.setValue(this.plugin.settings.metadataPersonTemplate);
+				text.setDisabled(!this.plugin.settings.mapMetadataToFrontmatter);
+				text.onChange(async (value) => {
+					if (value && !value.includes('{name}') && !value.includes('{value}') && !value.includes('{slug}')) {
+						new obsidian.Notice('Warning: People template should include {name}, {value}, or {slug}');
+					}
+					this.plugin.settings.metadataPersonTemplate = value || '{name}';
 					await this.plugin.saveSettings();
 				});
 			});
