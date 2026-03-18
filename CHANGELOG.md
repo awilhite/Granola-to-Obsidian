@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - **🔗 Metadata Value Templates**: New `Mapped org template` and `Mapped people template` settings to format mapped values with placeholders like `{name}` and `{slug}`
 - **🧹 Metadata Cleanup**: Optional setting to remove the inline `### Metadata` block from the note body after mapping it into frontmatter
 - **📄 Separate Transcript Notes**: Optionally store transcripts in their own notes with a link back from the main meeting note
+- **✅ Review Task Reminder**: Optional setting to add `- [ ] Review imported Granola note` near the top of synced notes
+- **🧪 Granola Template Management**: Experimental fork-specific feature that ensures a selected Granola template exists before sync using private Granola APIs and automatic template generation
 
 ## [1.9.3] - 2026-02-15
 ### Changed

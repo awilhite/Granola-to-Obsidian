@@ -1,6 +1,7 @@
 const obsidian = require('obsidian');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 function getDefaultAuthPath() {
 	if (obsidian.Platform.isWin) {
@@ -59,7 +60,282 @@ const DEFAULT_SETTINGS = {
 	removeMetadataSectionFromBody: false, // Remove the inline metadata section after mapping it
 	metadataOrgTemplate: '{name}', // Template for mapped org frontmatter values
 	metadataPersonTemplate: '{name}', // Template for mapped people frontmatter values
+	includeReviewTask: false, // Add a review task near the top of synced notes
+	enableGranolaTemplateManagement: false, // Automatically ensure a selected Granola template exists before sync
+	granolaTemplateId: '', // Selected Granola template ID for template management
+	granolaTemplateTitle: '', // Selected Granola template title for display
 };
+
+const REVIEW_TASK_TEXT = '- [ ] Review imported Granola note';
+const GRANOLA_TEMPLATE_CLIENT_VERSION = '7.71.1';
+
+function safeJsonParse(value, fallback = null) {
+	if (value === null || value === undefined) {
+		return fallback;
+	}
+
+	if (typeof value !== 'string') {
+		return value;
+	}
+
+	try {
+		return JSON.parse(value);
+	} catch (error) {
+		return fallback;
+	}
+}
+
+class GranolaPrivateClient {
+	constructor(authContext) {
+		this.authContext = authContext;
+	}
+
+	buildHeaders({ accept = 'application/json', contentType = 'application/json' } = {}) {
+		const headers = {
+			'Authorization': 'Bearer ' + this.authContext.token,
+			'Accept': accept,
+			'User-Agent': 'Granola/' + (this.authContext.clientVersion || GRANOLA_TEMPLATE_CLIENT_VERSION),
+			'X-Client-Version': this.authContext.clientVersion || GRANOLA_TEMPLATE_CLIENT_VERSION,
+			'X-Granola-Platform': this.authContext.platform || process.platform,
+			'X-Granola-Os-Version': this.authContext.osVersion || os.release(),
+		};
+
+		if (contentType) {
+			headers['Content-Type'] = contentType;
+		}
+		if (this.authContext.workspaceId) {
+			headers['X-Granola-Workspace-Id'] = this.authContext.workspaceId;
+		}
+		if (this.authContext.deviceId) {
+			headers['X-Granola-Device-Id'] = this.authContext.deviceId;
+		}
+		return headers;
+	}
+
+	async postJson(url, body, options = {}) {
+		const response = await obsidian.requestUrl({
+			url,
+			method: 'POST',
+			headers: this.buildHeaders(options),
+			body: JSON.stringify(body || {}),
+		});
+		return response.json;
+	}
+
+	async postText(url, body, options = {}) {
+		const response = await obsidian.requestUrl({
+			url,
+			method: 'POST',
+			headers: this.buildHeaders(options),
+			body: JSON.stringify(body || {}),
+		});
+		return response.text || '';
+	}
+
+	async getPanelTemplates() {
+		return await this.postJson('https://api.granola.ai/v1/get-panel-templates', {});
+	}
+
+	async getDocumentPanels(documentId) {
+		return await this.postJson('https://api.granola.ai/v1/get-document-panels', {
+			document_id: documentId,
+		});
+	}
+
+	async getDocumentBatch(documentId) {
+		const response = await this.postJson('https://api.granola.ai/v1/get-documents-batch', {
+			document_ids: [documentId],
+		});
+		return response && Array.isArray(response.docs) ? response.docs[0] : null;
+	}
+
+	async getDocumentMetadata(documentId) {
+		return await this.postJson('https://api.granola.ai/v1/get-document-metadata', {
+			document_id: documentId,
+		});
+	}
+
+	async getDocumentTranscript(documentId) {
+		return await this.postJson('https://api.granola.ai/v1/get-document-transcript', {
+			document_id: documentId,
+		});
+	}
+
+	async createDocumentPanel(documentId, templateId, title = 'Summary') {
+		return await this.postJson('https://api.granola.ai/v1/create-document-panel', {
+			document_id: documentId,
+			title,
+			content: '',
+			template_slug: templateId,
+			last_viewed_at: new Date().toISOString(),
+		});
+	}
+
+	async updateDocumentPanel(panelId, content) {
+		const now = new Date().toISOString();
+		return await this.postJson('https://api.granola.ai/v1/update-document-panel', {
+			id: panelId,
+			content,
+			original_content: content,
+			last_viewed_at: now,
+			content_updated_at: now,
+		});
+	}
+
+	formatTranscript(entries) {
+		if (!Array.isArray(entries) || entries.length === 0) {
+			return '';
+		}
+
+		let output = '';
+		let lastSpeaker = null;
+		for (const entry of entries) {
+			const speaker = entry && entry.source === 'microphone' ? 'Me' : 'Them';
+			if (speaker !== lastSpeaker) {
+				if (output) {
+					output += ' ';
+				}
+				output += `${speaker}: `;
+				lastSpeaker = speaker;
+			}
+			if (entry && entry.text) {
+				output += `${entry.text} `;
+			}
+		}
+
+		return output.trim();
+	}
+
+	stripNotesWrapper(text) {
+		return String(text || '')
+			.replace(/^\s*<notes>\s*/i, '')
+			.replace(/\s*<\/notes>\s*$/i, '')
+			.trim();
+	}
+
+	collectStreamContent(streamText) {
+		let content = '';
+		for (const chunk of String(streamText || '').split('-----CHUNK_BOUNDARY-----')) {
+			const trimmed = chunk.trim();
+			if (!trimmed) {
+				continue;
+			}
+
+			let parsed = null;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch (error) {
+				continue;
+			}
+
+			const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta
+				? parsed.choices[0].delta.content
+				: null;
+			if (typeof delta === 'string') {
+				content += delta;
+			}
+		}
+		return content;
+	}
+
+	buildPromptVariables(doc, metadata, transcriptEntries, template) {
+		const transcript = this.formatTranscript(transcriptEntries);
+		const createdAt = doc && doc.created_at ? new Date(doc.created_at) : new Date();
+		const notes = doc ? (doc.notes_markdown || doc.notes_plain || '') : '';
+		const transcriptLength = transcript.length;
+
+		let maxNumHeadings = 4;
+		if (transcriptLength >= 80000) {
+			maxNumHeadings = 8;
+		} else if (transcriptLength >= 20000) {
+			maxNumHeadings = Math.floor(transcriptLength / 10000) + 1;
+		} else if (transcriptLength >= 8000) {
+			maxNumHeadings = 5;
+		}
+
+		const creator = metadata && metadata.creator ? metadata.creator : {};
+		const creatorName = creator && creator.name ? creator.name : '';
+		const creatorEmail = creator && creator.email ? creator.email : '';
+		const creatorCompany = creator && creator.details && creator.details.company
+			? (creator.details.company.name || '')
+			: '';
+		const dateOnly = new Intl.DateTimeFormat('en-US', {
+			year: 'numeric',
+			month: 'long',
+			day: 'numeric',
+			timeZone: 'UTC',
+		}).format(createdAt);
+		const timeOnly = new Intl.DateTimeFormat('en-US', {
+			hour: 'numeric',
+			minute: '2-digit',
+			timeZone: 'UTC',
+		}).format(createdAt);
+		const todaysDate = new Intl.DateTimeFormat('en-US', {
+			year: 'numeric',
+			month: 'long',
+			day: 'numeric',
+		}).format(new Date());
+
+		return {
+			transcript,
+			notes,
+			viewer_name: '',
+			viewer_bio: '',
+			viewer_company: '',
+			my_name: creatorName,
+			my_bio: '',
+			their_name: '',
+			their_bio: '',
+			participants: creatorEmail ? `${creatorName} <${creatorEmail}>` : creatorName,
+			calendar_event_title: doc && doc.title ? doc.title : '',
+			headers: '',
+			document_id: doc && doc.id ? doc.id : '',
+			urls: '',
+			my_company: creatorCompany,
+			my_colleagues: '',
+			external_attendees: '',
+			external_companies: '',
+			time: timeOnly,
+			date: dateOnly,
+			todays_date: todaysDate,
+			is_multi_language: false,
+			is_british_english: false,
+			english_only_summary: true,
+			user_dictionary: '',
+			is_short_transcript: transcriptLength < 4000,
+			has_long_user_notes: notes.length > 1000,
+			is_ios: doc && doc.creation_source === 'iOS',
+			is_collaborative: false,
+			is_user_type_vc: false,
+			latest_meeting_summary: 'No summary',
+			tags: '',
+			summary_headings: Array.isArray(template.sections)
+				? template.sections.map((section) => `#${section.heading}: ${section.section_description}`).join('\n')
+				: '',
+			first_heading: Array.isArray(template.sections) && template.sections.length > 0
+				? `#${template.sections[0].heading}`
+				: '',
+			meeting_description: template.description || '',
+			max_num_headings: maxNumHeadings,
+			template_title: template.title || '',
+		};
+	}
+
+	async generateTemplateMarkdown(doc, metadata, transcriptEntries, template) {
+		const streamText = await this.postText(
+			'https://stream.api.granola.ai/v1/llm-proxy-stream',
+			{
+				prompt_slug: 'template-summary-consolidated',
+				prompt_variables: this.buildPromptVariables(doc, metadata, transcriptEntries, template),
+				chat_history: [],
+			},
+			{ accept: '*/*' }
+		);
+
+		const rawContent = this.collectStreamContent(streamText);
+		return this.stripNotesWrapper(rawContent);
+	}
+}
 
 class GranolaSyncPlugin extends obsidian.Plugin {
 	async onload() {
@@ -157,7 +433,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				text += 'Syncing...';
 			}
 		} else if (status === 'Complete') {
-			text += count + ' notes synced';
+			if (typeof count === 'string') {
+				text += count;
+			} else {
+				text += count + ' notes synced';
+			}
 			window.setTimeout(() => {
 				this.updateStatusBar('Idle');
 			}, 3000);
@@ -196,6 +476,42 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (frequency < 60000) return (frequency / 1000) + ' seconds';
 		if (minutes < 60) return minutes + ' minutes';
 		return hours + ' hours';
+	}
+
+	getGranolaPlatform() {
+		if (obsidian.Platform.isWin) return 'win32';
+		if (obsidian.Platform.isLinux) return 'linux';
+		return 'darwin';
+	}
+
+	getPublicGranolaHeaders(token) {
+		return {
+			'Authorization': 'Bearer ' + token,
+			'Content-Type': 'application/json',
+			'Accept': '*/*',
+			'User-Agent': 'Granola/' + GRANOLA_TEMPLATE_CLIENT_VERSION,
+			'X-Client-Version': GRANOLA_TEMPLATE_CLIENT_VERSION,
+		};
+	}
+
+	getTemplateManagementStatsSummary() {
+		const stats = this.templateManagementStats;
+		if (!stats || (!stats.attempted && !stats.skipped)) {
+			return '';
+		}
+
+		const parts = [];
+		if (stats.applied) {
+			parts.push(`${stats.applied} template-updated`);
+		}
+		if (stats.failed) {
+			parts.push(`${stats.failed} template-failed`);
+		}
+		if (stats.skipped) {
+			parts.push(`${stats.skipped} template-ready`);
+		}
+
+		return parts.join(', ');
 	}
 
 	// Helper function to get a readable speaker label
@@ -382,16 +698,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	async syncNotes() {
 		try {
 			this.updateStatusBar('Syncing');
+			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
 			
 			await this.ensureDirectoryExists();
 
-			const token = await this.loadCredentials();
-			if (!token) {
+			const authContext = await this.loadCredentials();
+			if (!authContext) {
 				this.updateStatusBar('Error', 'credentials failed');
 				return;
 			}
 
-			const documents = await this.fetchGranolaDocuments(token);
+			const documents = await this.fetchGranolaDocuments(authContext);
 			if (!documents) {
 				this.updateStatusBar('Error', 'fetch failed');
 				return;
@@ -400,7 +717,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			// Fetch folders if folder support or folder filtering is enabled
 			let folders = null;
 			if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
-				folders = await this.fetchGranolaFolders(token);
+				folders = await this.fetchGranolaFolders(authContext);
 				if (folders) {
 					// Create a mapping of document ID to folder for quick lookup
 					this.documentToFolderMap = {};
@@ -440,11 +757,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				try {
 					// Fetch transcript if enabled
 					if (this.shouldFetchTranscript()) {
-						const transcriptData = await this.fetchTranscript(token, doc.id);
+						const transcriptData = await this.fetchTranscript(authContext, doc.id);
 						doc.transcript = this.transcriptToMarkdown(transcriptData);
 					}
 
-					const success = await this.processDocument(doc);
+					const success = await this.processDocument(doc, authContext);
 					if (success) {
 						syncedCount++;
 					}
@@ -487,7 +804,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				await this.updatePeriodicNote(todaysNotesCopy);
 			}
 
-			this.updateStatusBar('Complete', syncedCount);
+			const templateSummary = this.getTemplateManagementStatsSummary();
+			if (templateSummary) {
+				console.log('Granola Template Management summary:', this.templateManagementStats);
+				this.updateStatusBar('Complete', `${syncedCount} notes synced, ${templateSummary}`);
+			} else {
+				this.updateStatusBar('Complete', syncedCount);
+			}
 
 			// Auto-reorganize if enabled
 			if (this.settings.enableAutoReorganize &&
@@ -506,15 +829,39 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	async loadCredentials() {
-		const homedir = require('os').homedir();
+		const homedir = os.homedir();
+		const storedAccountsPath = path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json');
 		const authPaths = [
 			// New location (with Users in path)
-			path.resolve(homedir, 'Users', require('os').userInfo().username, 'Library/Application Support/Granola/supabase.json'),
+			path.resolve(homedir, 'Users', os.userInfo().username, 'Library/Application Support/Granola/supabase.json'),
 			// Current configured path
 			path.resolve(homedir, this.settings.authKeyPath),
 			// Fallback to old default location
 			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
 		];
+
+		try {
+			if (fs.existsSync(storedAccountsPath)) {
+				const storedAccountsFile = fs.readFileSync(storedAccountsPath, 'utf8');
+				const storedAccounts = JSON.parse(storedAccountsFile);
+				const accounts = safeJsonParse(storedAccounts.accounts, []);
+				const primaryAccount = Array.isArray(accounts) && accounts.length > 0 ? accounts[0] : null;
+				const tokenData = primaryAccount ? safeJsonParse(primaryAccount.tokens, {}) : null;
+				if (tokenData && tokenData.access_token) {
+					console.log('Successfully loaded Granola credentials from:', storedAccountsPath);
+					return {
+						token: tokenData.access_token,
+						sessionId: tokenData.session_id || null,
+						clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
+						platform: this.getGranolaPlatform(),
+						osVersion: os.release(),
+						source: storedAccountsPath,
+					};
+				}
+			}
+		} catch (error) {
+			console.error('Error reading credentials from', storedAccountsPath, ':', error);
+		}
 
 		for (const authPath of authPaths) {
 			try {
@@ -526,15 +873,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const data = JSON.parse(credentialsFile);
 				
 				let accessToken = null;
+				let sessionId = data.session_id || null;
 				
 				// Try new token structure (workos_tokens)
 				if (data.workos_tokens) {
 					try {
 						const workosTokens = JSON.parse(data.workos_tokens);
 						accessToken = workosTokens.access_token;
+						sessionId = sessionId || workosTokens.session_id || null;
 					} catch (e) {
 						// workos_tokens might already be an object
 						accessToken = data.workos_tokens.access_token;
+						sessionId = sessionId || data.workos_tokens.session_id || null;
 					}
 				}
 				
@@ -551,7 +901,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				
 				if (accessToken) {
 					console.log('Successfully loaded credentials from:', authPath);
-					return accessToken;
+					return {
+						token: accessToken,
+						sessionId: sessionId || null,
+						clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
+						platform: this.getGranolaPlatform(),
+						osVersion: os.release(),
+						source: authPath,
+					};
 				}
 			} catch (error) {
 				console.error('Error reading credentials from', authPath, ':', error);
@@ -563,8 +920,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return null;
 	}
 
-	async fetchGranolaDocuments(token) {
+	async fetchGranolaDocuments(authContext) {
 		try {
+			const token = authContext.token;
 			const allDocs = [];
 			let offset = 0;
 			const batchSize = 100;
@@ -579,13 +937,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const response = await obsidian.requestUrl({
 					url: 'https://api.granola.ai/v2/get-documents',
 					method: 'POST',
-					headers: {
-						'Authorization': 'Bearer ' + token,
-						'Content-Type': 'application/json',
-						'Accept': '*/*',
-						'User-Agent': 'Granola/5.354.0',
-						'X-Client-Version': '5.354.0'
-					},
+					headers: this.getPublicGranolaHeaders(token),
 					body: JSON.stringify({
 						limit: batchSize,
 						offset: offset,
@@ -635,16 +987,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async fetchGranolaFolders(token) {
+	async fetchGranolaFolders(authContext) {
 		try {
 			const response = await obsidian.requestUrl({
 				url: 'https://api.granola.ai/v1/get-document-lists-metadata',
 				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': 'application/json'
-				},
+				headers: this.getPublicGranolaHeaders(authContext.token),
 				body: JSON.stringify({
 					include_document_ids: true,
 					include_only_joined_lists: false
@@ -667,16 +1015,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async fetchTranscript(token, docId) {
+	async fetchTranscript(authContext, docId) {
 		try {
 			const response = await obsidian.requestUrl({
 				url: `https://api.granola.ai/v1/get-document-transcript`,
 				method: 'POST',
-				headers: {
-					'Authorization': 'Bearer ' + token,
-					'Content-Type': 'application/json',
-					'Accept': 'application/json',
-				},
+				headers: this.getPublicGranolaHeaders(authContext.token),
 				body: JSON.stringify({
 					'document_id': docId
 				})
@@ -688,6 +1032,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			console.error('Error fetching transcript for document ' + docId + ':' + error);
 			return null;
 		}
+	}
+
+	getGranolaPrivateClient(authContext) {
+		return new GranolaPrivateClient(authContext);
+	}
+
+	async fetchGranolaTemplates(authContext, forceRefresh = false) {
+		if (!forceRefresh && Array.isArray(this.availableGranolaTemplates) && this.availableGranolaTemplates.length > 0) {
+			return this.availableGranolaTemplates;
+		}
+
+		const client = this.getGranolaPrivateClient(authContext);
+		const templates = await client.getPanelTemplates();
+		this.availableGranolaTemplates = Array.isArray(templates) ? templates : [];
+		return this.availableGranolaTemplates;
 	}
 
 	convertProseMirrorToMarkdown(content) {
@@ -868,7 +1227,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return { metadata: null, content: markdown || '' };
 		}
 
-		const match = markdown.match(/^### Metadata\s*\n+\s*({[\s\S]*?})\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/);
+		const match = markdown.match(/^(?:### Metadata\s*\n+)?(?:```json\s*\n)?\s*({[\s\S]*?})\s*(?:\n```)?\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/);
 		if (!match) {
 			return { metadata: null, content: markdown };
 		}
@@ -1284,6 +1643,146 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return null;
 	}
 
+	shouldUseGranolaTemplateManagement() {
+		return Boolean(this.settings.enableGranolaTemplateManagement && this.settings.granolaTemplateId);
+	}
+
+	getReviewTaskLine() {
+		return this.settings.includeReviewTask ? REVIEW_TASK_TEXT : '';
+	}
+
+	getGranolaTemplatePanel(panels, templateId) {
+		if (!templateId || !Array.isArray(panels)) {
+			return null;
+		}
+
+		const matches = panels.filter((panel) =>
+			panel &&
+			!panel.deleted_at &&
+			panel.template_slug === templateId
+		);
+
+		if (matches.length === 0) {
+			return null;
+		}
+
+		matches.sort((a, b) => {
+			const timeA = new Date(a.content_updated_at || a.updated_at || 0).getTime();
+			const timeB = new Date(b.content_updated_at || b.updated_at || 0).getTime();
+			return timeB - timeA;
+		});
+
+		return matches[0];
+	}
+
+	getPanelMarkdownContent(panel) {
+		if (!panel || panel.deleted_at) {
+			return '';
+		}
+
+		if (typeof panel.content === 'string') {
+			return panel.content.trim();
+		}
+
+		if (panel.content && panel.content.type === 'doc') {
+			return this.convertProseMirrorToMarkdown(panel.content).trim();
+		}
+
+		return '';
+	}
+
+	getEnhancedNotesMarkdown(doc) {
+		const selectedTemplatePanel = this.getGranolaTemplatePanel(doc.privatePanels, this.settings.granolaTemplateId);
+		const templateMarkdown = this.getPanelMarkdownContent(selectedTemplatePanel);
+		if (templateMarkdown) {
+			return templateMarkdown;
+		}
+
+		if (typeof doc.granolaTemplateManagementMarkdown === 'string' && doc.granolaTemplateManagementMarkdown.trim()) {
+			return doc.granolaTemplateManagementMarkdown.trim();
+		}
+
+		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
+		if (!enhancedNotesContent) {
+			return '';
+		}
+
+		return this.convertProseMirrorToMarkdown(enhancedNotesContent).trim();
+	}
+
+	async ensureGranolaTemplateForDocument(doc, authContext) {
+		if (!this.shouldUseGranolaTemplateManagement()) {
+			return doc;
+		}
+
+		if (!this.templateManagementStats) {
+			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
+		}
+
+		try {
+			const client = this.getGranolaPrivateClient(authContext);
+			const existingPanels = await client.getDocumentPanels(doc.id);
+			doc.privatePanels = Array.isArray(existingPanels) ? existingPanels : [];
+
+			const existingTemplatePanel = this.getGranolaTemplatePanel(doc.privatePanels, this.settings.granolaTemplateId);
+			if (existingTemplatePanel) {
+				this.templateManagementStats.skipped++;
+				const existingMarkdown = this.getPanelMarkdownContent(existingTemplatePanel);
+				if (existingMarkdown) {
+					doc.granolaTemplateManagementMarkdown = existingMarkdown;
+				}
+				return doc;
+			}
+
+			this.templateManagementStats.attempted++;
+
+			const templates = await this.fetchGranolaTemplates(authContext);
+			const selectedTemplate = templates.find((template) => template.id === this.settings.granolaTemplateId);
+			if (!selectedTemplate) {
+				throw new Error('Selected Granola template could not be found');
+			}
+
+			const [batchDoc, metadata, transcriptEntries] = await Promise.all([
+				client.getDocumentBatch(doc.id),
+				client.getDocumentMetadata(doc.id),
+				client.getDocumentTranscript(doc.id),
+			]);
+
+			const generatedMarkdown = await client.generateTemplateMarkdown(batchDoc || doc, metadata || {}, transcriptEntries || [], selectedTemplate);
+			if (!generatedMarkdown) {
+				throw new Error('Granola template generation returned empty content');
+			}
+
+			const createdPanel = await client.createDocumentPanel(doc.id, selectedTemplate.id);
+			if (!createdPanel || !createdPanel.id) {
+				throw new Error('Granola template panel could not be created');
+			}
+
+			await client.updateDocumentPanel(createdPanel.id, generatedMarkdown);
+
+			const [refreshedPanels, refreshedDoc] = await Promise.all([
+				client.getDocumentPanels(doc.id),
+				client.getDocumentBatch(doc.id),
+			]);
+
+			doc.privatePanels = Array.isArray(refreshedPanels) ? refreshedPanels : doc.privatePanels;
+			doc.granolaTemplateManagementMarkdown = generatedMarkdown;
+			if (refreshedDoc && refreshedDoc.updated_at) {
+				doc.updated_at = refreshedDoc.updated_at;
+			} else {
+				doc.updated_at = new Date().toISOString();
+			}
+
+			this.templateManagementStats.applied++;
+			console.log(`Granola Template Management applied "${selectedTemplate.title}" to "${doc.title || doc.id}"`);
+		} catch (error) {
+			this.templateManagementStats.failed++;
+			console.error('Granola Template Management failed for "' + (doc.title || doc.id) + '":', error);
+		}
+
+		return doc;
+	}
+
 	/**
 	 * Builds the note content from available sections.
 	 * Includes My Notes, Enhanced Notes, and Transcript based on settings and availability.
@@ -1298,6 +1797,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// Add main title
 		sections.push('# ' + noteTitle);
 
+		const reviewTaskLine = this.getReviewTaskLine();
+		if (reviewTaskLine) {
+			sections.push('\n' + reviewTaskLine);
+		}
+
 		// Extract My Notes content
 		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
 		if (myNotesContent && this.settings.includeMyNotes) {
@@ -1308,11 +1812,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Extract Enhanced Notes content
-		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
-		if (enhancedNotesContent && this.settings.includeEnhancedNotes) {
-			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
-			if (enhancedNotesMarkdown && enhancedNotesMarkdown.trim()) {
-				const metadataSection = this.extractMetadataSection(enhancedNotesMarkdown);
+		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
+		if (enhancedNotesMarkdown && this.settings.includeEnhancedNotes) {
+			const metadataSection = this.extractMetadataSection(enhancedNotesMarkdown);
 				const enhancedBodyMarkdown =
 					this.settings.mapMetadataToFrontmatter &&
 					this.settings.removeMetadataSectionFromBody &&
@@ -1321,12 +1823,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						: enhancedNotesMarkdown;
 
 				// If we have My Notes, add Enhanced Notes as a separate section
-				if (myNotesContent && this.settings.includeMyNotes) {
-					sections.push('\n## Enhanced Notes\n\n' + enhancedBodyMarkdown.trim());
-				} else {
-					// If no My Notes, just add the enhanced notes content directly
-					sections.push('\n' + enhancedBodyMarkdown.trim());
-				}
+			if (myNotesContent && this.settings.includeMyNotes) {
+				sections.push('\n## Enhanced Notes\n\n' + enhancedBodyMarkdown.trim());
+			} else {
+				// If no My Notes, just add the enhanced notes content directly
+				sections.push('\n' + enhancedBodyMarkdown.trim());
 			}
 		}
 
@@ -1340,20 +1841,22 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return sections.join('\n');
 	}
 
-	async processDocument(doc) {
+	async processDocument(doc, authContext) {
 	try {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
 		const transcript = doc.transcript || 'no_transcript';
 
+		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
+
 		// Extract all available content
 		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
-		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
+		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
 		const hasTranscript = this.shouldFetchTranscript() && transcript && transcript !== 'no_transcript';
 
 		// Check if there's any content to process
 		const hasMyNotes = myNotesContent && this.settings.includeMyNotes;
-		const hasEnhancedNotes = enhancedNotesContent && this.settings.includeEnhancedNotes;
+		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
 
 		// If no content is available at all, skip this document
 		if (!hasMyNotes && !hasEnhancedNotes && !hasTranscript) {
@@ -2136,8 +2639,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		if (this.settings.mapMetadataToFrontmatter) {
-			const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
-			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
+			const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
 			const { metadata } = this.extractMetadataSection(enhancedNotesMarkdown);
 
 			if (metadata && typeof metadata === 'object') {
@@ -2287,9 +2789,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			// Fetch folders if folder support is enabled
 			let folders = null;
 			if (this.settings.enableGranolaFolders) {
-				const token = await this.loadCredentials();
-				if (token) {
-					folders = await this.fetchGranolaFolders(token);
+				const authContext = await this.loadCredentials();
+				if (authContext) {
+					folders = await this.fetchGranolaFolders(authContext);
 					if (folders) {
 						// Create a mapping of document ID to folder for quick lookup
 						this.documentToFolderMap = {};
@@ -2450,6 +2952,17 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				toggle.setValue(this.plugin.settings.includeEnhancedNotes);
 				toggle.onChange(async (value) => {
 					this.plugin.settings.includeEnhancedNotes = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Add review task to synced notes')
+			.setDesc('Insert "- [ ] Review imported Granola note" near the top of each synced summary note. If the note is later rewritten, the task is reset to unchecked.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.includeReviewTask);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.includeReviewTask = value;
 					await this.plugin.saveSettings();
 				});
 			});
@@ -2636,6 +3149,74 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 		warningNameEl.setText('⚠️ Please backup your vault');
 		const warningDescEl = experimentalWarning.createEl('div', { cls: 'setting-item-description' });
 		warningDescEl.setText('⚠️ The features below are experimental and may create duplicate notes if not used carefully. Please backup your vault before changing these settings.');
+
+		new obsidian.Setting(containerEl)
+			.setName('Enable Granola Template Management')
+			.setDesc('Automatically ensure a selected Granola template exists before syncing a note. This uses private Granola APIs and is currently fork-specific.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.enableGranolaTemplateManagement);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.enableGranolaTemplateManagement = value;
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			});
+
+		if (this.plugin.settings.enableGranolaTemplateManagement) {
+			new obsidian.Setting(containerEl)
+				.setName('Granola template')
+				.setDesc('Choose the Granola template the plugin should ensure exists before syncing. Template management only runs when this template is missing on a note.')
+				.addDropdown(dropdown => {
+					const templates = Array.isArray(this.plugin.availableGranolaTemplates)
+						? [...this.plugin.availableGranolaTemplates].sort((a, b) => (a.title || '').localeCompare(b.title || ''))
+						: [];
+
+					dropdown.addOption('', this.plugin.settings.granolaTemplateTitle || 'Select a Granola template');
+					for (const template of templates) {
+						dropdown.addOption(template.id, template.title || template.id);
+					}
+
+					dropdown.setValue(this.plugin.settings.granolaTemplateId || '');
+					dropdown.onChange(async (value) => {
+						this.plugin.settings.granolaTemplateId = value;
+						const selectedTemplate = templates.find((template) => template.id === value);
+						this.plugin.settings.granolaTemplateTitle = selectedTemplate ? (selectedTemplate.title || '') : '';
+						await this.plugin.saveSettings();
+					});
+				})
+				.addButton(button => {
+					button.setButtonText('Refresh templates');
+					button.onClick(async () => {
+						try {
+							const authContext = await this.plugin.loadCredentials();
+							if (!authContext) {
+								new obsidian.Notice('Could not load Granola credentials. Please check your auth key path.');
+								return;
+							}
+
+							const templates = await this.plugin.fetchGranolaTemplates(authContext, true);
+							if (templates && templates.length > 0) {
+								new obsidian.Notice(`Loaded ${templates.length} Granola templates`);
+							} else {
+								new obsidian.Notice('No Granola templates were returned');
+							}
+							this.display();
+						} catch (error) {
+							console.error('Error refreshing Granola templates:', error);
+							new obsidian.Notice('Error refreshing Granola templates. Check console for details.');
+						}
+					});
+				});
+
+			if (!Array.isArray(this.plugin.availableGranolaTemplates) || this.plugin.availableGranolaTemplates.length === 0) {
+				const templateInfoEl = containerEl.createEl('div', { cls: 'setting-item' });
+				templateInfoEl.createEl('div', { cls: 'setting-item-info' });
+				const templateInfoNameEl = templateInfoEl.createEl('div', { cls: 'setting-item-name' });
+				templateInfoNameEl.setText('Granola templates not loaded yet');
+				const templateInfoDescEl = templateInfoEl.createEl('div', { cls: 'setting-item-description' });
+				templateInfoDescEl.setText('Use "Refresh templates" to load the live template list from Granola before selecting one.');
+			}
+		}
 
 		new obsidian.Setting(containerEl)
 			.setName('Search scope for existing notes')
@@ -3050,12 +3631,12 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 					button.setButtonText('Refresh folders');
 					button.onClick(async () => {
 						try {
-							const token = await this.plugin.loadCredentials();
-							if (!token) {
+							const authContext = await this.plugin.loadCredentials();
+							if (!authContext) {
 								new obsidian.Notice('Could not load credentials. Please check your auth key path.');
 								return;
 							}
-							const folders = await this.plugin.fetchGranolaFolders(token);
+							const folders = await this.plugin.fetchGranolaFolders(authContext);
 							if (folders) {
 								this.plugin.availableGranolaFolders = folders;
 								new obsidian.Notice(`Found ${folders.length} folders`);
