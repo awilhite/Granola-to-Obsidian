@@ -42,6 +42,8 @@ const DEFAULT_SETTINGS = {
 	syncAllHistoricalNotes: false, // Sync all historical notes from Granola, not just recent ones
 	documentSyncLimit: 100, // Maximum number of documents to sync (used when syncAllHistoricalNotes is false)
 	includeFullTranscript: false, // Include full meeting transcript in notes
+	storeTranscriptInSeparateNote: false, // Store transcripts in separate notes instead of embedding inline
+	transcriptDirectory: 'Granola Transcripts', // Folder to store separate transcript notes in
 	includeMyNotes: true, // Include "My Notes" section from Granola
 	includeEnhancedNotes: true, // Include "Enhanced Notes" (AI summary) from Granola
 	selectedGranolaFolders: [], // Array of Granola folder IDs to sync (empty = sync all)
@@ -260,6 +262,121 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	}
 
+	shouldFetchTranscript() {
+		return this.settings.includeFullTranscript || this.settings.storeTranscriptInSeparateNote;
+	}
+
+	normalizeVaultPath(filePath) {
+		return obsidian.normalizePath(filePath).replace(/\\/g, '/');
+	}
+
+	getTranscriptDirectoryPath(doc) {
+		const baseDirectory = this.normalizeVaultPath(this.settings.transcriptDirectory);
+		if (!this.settings.enableDateBasedFolders || !doc.created_at) {
+			return baseDirectory;
+		}
+
+		const dateFolder = this.formatDate(doc.created_at, this.settings.dateFolderFormat);
+		return this.normalizeVaultPath(path.join(baseDirectory, dateFolder));
+	}
+
+	generateTranscriptLink(filePath) {
+		const normalizedPath = this.normalizeVaultPath(filePath).replace(/\.md$/i, '');
+		return '## Transcript\n\n[[' + normalizedPath + '|Transcript]]';
+	}
+
+	buildTranscriptFrontmatter(doc, title) {
+		let frontmatter = '---\n';
+		frontmatter += 'granola_id: ' + (doc.id || 'unknown_id') + '\n';
+		frontmatter += 'granola_transcript: true\n';
+		frontmatter += 'source: "Granola"\n';
+
+		if (this.settings.includeTitle) {
+			const escapedTitle = title.replace(/"/g, '\\"');
+			frontmatter += 'title: "' + escapedTitle + ' Transcript"\n';
+		}
+
+		if (this.settings.includeDates) {
+			if (doc.created_at) {
+				frontmatter += 'created_at: ' + this.formatFrontmatterDate(doc.created_at) + '\n';
+			}
+			if (doc.updated_at) {
+				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(doc.updated_at) + '\n';
+			}
+		}
+
+		frontmatter += '---\n\n';
+		return frontmatter;
+	}
+
+	buildTranscriptNoteContent(doc, transcript) {
+		const noteTitle = this.generateNoteTitle(doc);
+		return this.buildTranscriptFrontmatter(doc, noteTitle)
+			+ '# ' + noteTitle + ' Transcript\n\n'
+			+ transcript.trim()
+			+ '\n';
+	}
+
+	async findExistingTranscriptNoteByGranolaId(docId) {
+		const transcriptDirectory = this.normalizeVaultPath(this.settings.transcriptDirectory);
+		const files = this.app.vault.getMarkdownFiles().filter(file =>
+			file.path === transcriptDirectory || file.path.startsWith(transcriptDirectory + '/')
+		);
+
+		for (const file of files) {
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) {
+					continue;
+				}
+
+				const frontmatter = frontmatterMatch[1];
+				const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
+				const transcriptMatch = frontmatter.match(/granola_transcript:\s*true$/m);
+
+				if (granolaIdMatch && transcriptMatch && granolaIdMatch[1].trim() === docId) {
+					return file;
+				}
+			} catch (error) {
+				console.error('Error reading transcript note for duplicate detection:', file.path, error);
+			}
+		}
+
+		return null;
+	}
+
+	async writeSeparateTranscriptNote(doc, transcript) {
+		if (!this.settings.storeTranscriptInSeparateNote || !transcript || transcript === 'no_transcript') {
+			return null;
+		}
+
+		const transcriptContent = this.buildTranscriptNoteContent(doc, transcript);
+		const existingTranscript = await this.findExistingTranscriptNoteByGranolaId(doc.id || 'unknown_id');
+		if (existingTranscript) {
+			await this.app.vault.modify(existingTranscript, transcriptContent);
+			return existingTranscript.path;
+		}
+
+		const targetDirectory = this.getTranscriptDirectoryPath(doc);
+		await this.ensureDateBasedDirectoryExists(targetDirectory);
+
+		const filename = this.generateFilename(doc) + '.md';
+		const filepath = this.normalizeVaultPath(path.join(targetDirectory, filename));
+		const existingFileByName = this.app.vault.getAbstractFileByPath(filepath);
+		if (existingFileByName) {
+			const timestamp = this.formatDate(doc.created_at, 'HH-mm');
+			const baseFilename = this.generateFilename(doc);
+			const uniqueFilename = baseFilename + ' Transcript ' + timestamp + '.md';
+			const finalFilepath = this.normalizeVaultPath(path.join(targetDirectory, uniqueFilename));
+			await this.app.vault.create(finalFilepath, transcriptContent);
+			return finalFilepath;
+		}
+
+		await this.app.vault.create(filepath, transcriptContent);
+		return filepath;
+	}
+
 	async syncNotes() {
 		try {
 			this.updateStatusBar('Syncing');
@@ -320,7 +437,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const doc = documentsToSync[i];
 				try {
 					// Fetch transcript if enabled
-					if (this.settings.includeFullTranscript) {
+					if (this.shouldFetchTranscript()) {
 						const transcriptData = await this.fetchTranscript(token, doc.id);
 						doc.transcript = this.transcriptToMarkdown(transcriptData);
 					}
@@ -848,9 +965,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * avoiding duplicates when "Skip Existing Notes" is enabled.
 	 * 
 	 * @param {string} granolaId - The Granola ID to search for
+	 * @param {object} options - Search options
+	 * @param {boolean} options.includeTranscriptNotes - Whether transcript notes should be considered matches
 	 * @returns {TFile|null} The found file or null if not found
 	 */
-		async findExistingNoteByGranolaId(granolaId) {
+		async findExistingNoteByGranolaId(granolaId, options = {}) {
+		const includeTranscriptNotes = options.includeTranscriptNotes === true;
 		let filesToSearch = [];
 
 		if (this.settings.existingNoteSearchScope === 'entireVault') {
@@ -887,8 +1007,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				if (frontmatterMatch) {
 					const frontmatter = frontmatterMatch[1];
 					const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
+					const transcriptMatch = frontmatter.match(/granola_transcript:\s*true$/m);
 					
-					if (granolaIdMatch && granolaIdMatch[1].trim() === granolaId) {
+					if (
+						granolaIdMatch &&
+						granolaIdMatch[1].trim() === granolaId &&
+						(includeTranscriptNotes || !transcriptMatch)
+					) {
 						return file;
 					}
 				}
@@ -1139,7 +1264,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * @param {string} transcript - The transcript markdown (if fetched)
 	 * @returns {string} The combined markdown content
 	 */
-	buildNoteContent(doc, transcript) {
+	buildNoteContent(doc, transcript, transcriptFilePath = null) {
 		const sections = [];
 		const noteTitle = this.generateNoteTitle(doc);
 
@@ -1178,8 +1303,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 		}
 
-		// Add transcript section if enabled and available
-		if (this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript') {
+		if (transcriptFilePath) {
+			sections.push('\n' + this.generateTranscriptLink(transcriptFilePath));
+		} else if (this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript') {
+			// Add transcript section if enabled and available
 			sections.push('\n## Transcript\n\n' + transcript);
 		}
 
@@ -1195,7 +1322,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// Extract all available content
 		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
 		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
-		const hasTranscript = this.settings.includeFullTranscript && transcript && transcript !== 'no_transcript';
+		const hasTranscript = this.shouldFetchTranscript() && transcript && transcript !== 'no_transcript';
 
 		// Check if there's any content to process
 		const hasMyNotes = myNotesContent && this.settings.includeMyNotes;
@@ -1254,6 +1381,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const finalMarkdown = frontmatter + noteContent;
 
 				await this.app.vault.process(existingFile, () => finalMarkdown);
+
+				if (this.settings.storeTranscriptInSeparateNote && hasTranscript) {
+					const transcriptFilePath = await this.writeSeparateTranscriptNote(doc, transcript);
+					if (transcriptFilePath) {
+						const linkedMarkdown = frontmatter + this.buildNoteContent(doc, transcript, transcriptFilePath);
+						await this.app.vault.process(existingFile, () => linkedMarkdown);
+					}
+				}
 				return true;
 			} catch (updateError) {
 				console.error('Error updating existing note:', updateError);
@@ -1309,6 +1444,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					if (granolaIdMatch && granolaIdMatch[1].trim() === docId) {
 						// Same granola_id - update the existing file instead of creating duplicate
 						await this.app.vault.modify(existingFileByName, finalMarkdown);
+
+						if (this.settings.storeTranscriptInSeparateNote && hasTranscript) {
+							const transcriptFilePath = await this.writeSeparateTranscriptNote(doc, transcript);
+							if (transcriptFilePath) {
+								const linkedMarkdown = frontmatter + this.buildNoteContent(doc, transcript, transcriptFilePath);
+								await this.app.vault.modify(existingFileByName, linkedMarkdown);
+							}
+						}
 						return true;
 					}
 				}
@@ -1336,6 +1479,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		await this.app.vault.create(finalFilepath, finalMarkdown);
+
+		if (this.settings.storeTranscriptInSeparateNote && hasTranscript) {
+			const transcriptFilePath = await this.writeSeparateTranscriptNote(doc, transcript);
+			if (transcriptFilePath) {
+				const summaryFile = this.app.vault.getAbstractFileByPath(finalFilepath);
+				if (summaryFile) {
+					const linkedMarkdown = frontmatter + this.buildNoteContent(doc, transcript, transcriptFilePath);
+					await this.app.vault.modify(summaryFile, linkedMarkdown);
+				}
+			}
+		}
 		return true;
 
 	} catch (error) {
@@ -2273,8 +2427,35 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				toggle.onChange(async (value) => {
 					this.plugin.settings.includeFullTranscript = value;
 					await this.plugin.saveSettings();
+					this.display();
 				});
 			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Store transcript in separate note')
+			.setDesc('Write the transcript to a separate note and add a transcript link to the main note instead of embedding the full transcript inline.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.storeTranscriptInSeparateNote);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.storeTranscriptInSeparateNote = value;
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			});
+
+		if (this.plugin.settings.storeTranscriptInSeparateNote) {
+			new obsidian.Setting(containerEl)
+				.setName('Transcript directory')
+				.setDesc('Folder where separate transcript notes should be stored.')
+				.addText(text => {
+					text.setPlaceholder('Granola Transcripts');
+					text.setValue(this.plugin.settings.transcriptDirectory);
+					text.onChange(async (value) => {
+						this.plugin.settings.transcriptDirectory = value || 'Granola Transcripts';
+						await this.plugin.saveSettings();
+					});
+				});
+		}
 
 		// Create a heading for filename settings
 		containerEl.createEl('h3', {text: 'Filename settings'});
