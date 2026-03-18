@@ -53,6 +53,8 @@ const DEFAULT_SETTINGS = {
 	frontmatterDateFormat: 'iso', // 'iso', 'date-only', 'custom'
 	customDateFormat: 'YYYY-MM-DD', // Custom date format string
 	additionalFrontmatter: '', // Additional frontmatter lines (key: value, one per line)
+	mapMetadataToFrontmatter: false, // Map Granola metadata block fields into frontmatter
+	removeMetadataSectionFromBody: false, // Remove the inline metadata section after mapping it
 };
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -697,6 +699,49 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return title.replace(/[<>:"/\\|?*]/g, '').trim();
 	}
 
+	escapeYamlString(value) {
+		return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+	}
+
+	formatFrontmatterList(key, values) {
+		if (!Array.isArray(values) || values.length === 0) {
+			return `${key}: []\n`;
+		}
+
+		const lines = [`${key}:\n`];
+		for (const value of values) {
+			if (value === null || value === undefined || value === '') {
+				continue;
+			}
+			lines.push(`  - ${this.escapeYamlString(value)}\n`);
+		}
+
+		return lines.length === 1 ? `${key}: []\n` : lines.join('');
+	}
+
+	extractMetadataSection(markdown) {
+		if (!markdown || typeof markdown !== 'string') {
+			return { metadata: null, content: markdown || '' };
+		}
+
+		const match = markdown.match(/^### Metadata\s*\n+\s*({[\s\S]*?})\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/);
+		if (!match) {
+			return { metadata: null, content: markdown };
+		}
+
+		const rawJson = match[1];
+		try {
+			const metadata = JSON.parse(rawJson);
+			const content = (markdown.slice(0, match.index) + markdown.slice(match.index + match[0].length))
+				.replace(/^\s+/, '')
+				.replace(/\n{3,}/g, '\n\n');
+			return { metadata, content };
+		} catch (error) {
+			console.error('Error parsing metadata section:', error);
+			return { metadata: null, content: markdown };
+		}
+	}
+
 	generateFilename(doc) {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
@@ -1115,12 +1160,20 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (enhancedNotesContent && this.settings.includeEnhancedNotes) {
 			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
 			if (enhancedNotesMarkdown && enhancedNotesMarkdown.trim()) {
+				const metadataSection = this.extractMetadataSection(enhancedNotesMarkdown);
+				const enhancedBodyMarkdown =
+					this.settings.mapMetadataToFrontmatter &&
+					this.settings.removeMetadataSectionFromBody &&
+					metadataSection.metadata
+						? metadataSection.content
+						: enhancedNotesMarkdown;
+
 				// If we have My Notes, add Enhanced Notes as a separate section
 				if (myNotesContent && this.settings.includeMyNotes) {
-					sections.push('\n## Enhanced Notes\n\n' + enhancedNotesMarkdown.trim());
+					sections.push('\n## Enhanced Notes\n\n' + enhancedBodyMarkdown.trim());
 				} else {
 					// If no My Notes, just add the enhanced notes content directly
-					sections.push('\n' + enhancedNotesMarkdown.trim());
+					sections.push('\n' + enhancedBodyMarkdown.trim());
 				}
 			}
 		}
@@ -1844,6 +1897,26 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	getAdditionalFrontmatterKeys() {
+		if (!this.settings.additionalFrontmatter || !this.settings.additionalFrontmatter.trim()) {
+			return new Set();
+		}
+
+		const keys = new Set();
+		for (const line of this.settings.additionalFrontmatter.split('\n')) {
+			const trimmed = line.trim();
+			if (!trimmed || !trimmed.includes(':')) {
+				continue;
+			}
+			const key = trimmed.split(':')[0].trim();
+			if (key) {
+				keys.add(key);
+			}
+		}
+
+		return keys;
+	}
+
 	/**
 	 * Build frontmatter string for a document
 	 * @param {object} doc - Granola document
@@ -1855,6 +1928,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	buildFrontmatter(doc, title, allTags, granolaUrl) {
 		const docId = doc.id;
 		let frontmatter = '---\n';
+		const additionalFrontmatterKeys = this.getAdditionalFrontmatterKeys();
 		
 		// granola_id is always included (required for duplicate detection)
 		frontmatter += 'granola_id: ' + docId + '\n';
@@ -1877,6 +1951,30 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 			if (doc.updated_at) {
 				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(doc.updated_at) + '\n';
+			}
+		}
+
+		if (this.settings.mapMetadataToFrontmatter) {
+			const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
+			const enhancedNotesMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent);
+			const { metadata } = this.extractMetadataSection(enhancedNotesMarkdown);
+
+			if (metadata && typeof metadata === 'object') {
+				if (metadata.org && !additionalFrontmatterKeys.has('org')) {
+					frontmatter += 'org: ' + this.escapeYamlString(metadata.org) + '\n';
+				}
+				if (!additionalFrontmatterKeys.has('people')) {
+					frontmatter += this.formatFrontmatterList('people', metadata.people);
+				}
+				if (!additionalFrontmatterKeys.has('topics')) {
+					frontmatter += this.formatFrontmatterList('topics', metadata.topics);
+				}
+				if (!additionalFrontmatterKeys.has('loc')) {
+					frontmatter += this.formatFrontmatterList('loc', metadata.loc);
+				}
+				if (metadata.meeting_type && !additionalFrontmatterKeys.has('meeting_type')) {
+					frontmatter += 'meeting_type: ' + this.escapeYamlString(metadata.meeting_type) + '\n';
+				}
 			}
 		}
 		
@@ -2465,6 +2563,30 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 				textArea.inputEl.cols = 30;
 				textArea.onChange(async (value) => {
 					this.plugin.settings.additionalFrontmatter = value;
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Map metadata to frontmatter')
+			.setDesc('Extract Granola’s inline metadata block and map fields like org, people, topics, loc, and meeting_type into frontmatter.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.mapMetadataToFrontmatter);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.mapMetadataToFrontmatter = value;
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			});
+
+		new obsidian.Setting(containerEl)
+			.setName('Remove metadata section from body')
+			.setDesc('When metadata is mapped into frontmatter, remove the inline "### Metadata" block from the note body.')
+			.addToggle(toggle => {
+				toggle.setValue(this.plugin.settings.removeMetadataSectionFromBody);
+				toggle.setDisabled(!this.plugin.settings.mapMetadataToFrontmatter);
+				toggle.onChange(async (value) => {
+					this.plugin.settings.removeMetadataSectionFromBody = value;
 					await this.plugin.saveSettings();
 				});
 			});
