@@ -68,6 +68,7 @@ const DEFAULT_SETTINGS = {
 
 const REVIEW_TASK_TEXT = '- [ ] Review imported Granola note';
 const GRANOLA_TEMPLATE_CLIENT_VERSION = '7.71.1';
+const POST_MEETING_SYNC_DELAY_MS = 2 * 60 * 1000;
 
 function safeJsonParse(value, fallback = null) {
 	if (value === null || value === undefined) {
@@ -608,6 +609,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		frontmatter += 'granola_id: ' + (doc.id || 'unknown_id') + '\n';
 		frontmatter += 'granola_transcript: true\n';
 		frontmatter += 'source: "Granola"\n';
+		const syncUpdatedAt = this.getDocumentSyncUpdatedAt(doc);
 
 		if (this.settings.includeTitle) {
 			const escapedTitle = title.replace(/"/g, '\\"');
@@ -618,9 +620,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (doc.created_at) {
 				frontmatter += 'created_at: ' + this.formatFrontmatterDate(doc.created_at) + '\n';
 			}
-			if (doc.updated_at) {
-				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(doc.updated_at) + '\n';
+			if (syncUpdatedAt) {
+				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(syncUpdatedAt) + '\n';
 			}
+		}
+
+		if (syncUpdatedAt) {
+			frontmatter += 'granola_updated_at: ' + syncUpdatedAt + '\n';
 		}
 
 		frontmatter += '---\n\n';
@@ -755,6 +761,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			for (let i = 0; i < documentsToSync.length; i++) {
 				const doc = documentsToSync[i];
 				try {
+					const readiness = this.getDocumentSyncReadiness(doc);
+					if (!readiness.ready) {
+						console.log('Skipping document "' + (doc.title || doc.id) + '" - ' + readiness.reason);
+						continue;
+					}
+
 					// Fetch transcript if enabled
 					if (this.shouldFetchTranscript()) {
 						const transcriptData = await this.fetchTranscript(authContext, doc.id);
@@ -1710,6 +1722,122 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return this.convertProseMirrorToMarkdown(enhancedNotesContent).trim();
 	}
 
+	getAllDocumentPanels(doc) {
+		const panelsById = new Map();
+
+		const addPanel = (panel) => {
+			if (!panel || typeof panel !== 'object') {
+				return;
+			}
+
+			if (panel.id) {
+				panelsById.set(panel.id, panel);
+				return;
+			}
+
+			const syntheticId = JSON.stringify([
+				panel.template_slug || '',
+				panel.type || '',
+				panel.title || '',
+				panel.updated_at || '',
+				panel.content_updated_at || ''
+			]);
+			panelsById.set(syntheticId, panel);
+		};
+
+		for (const panel of doc.privatePanels || []) {
+			addPanel(panel);
+		}
+
+		for (const panel of doc.panels || []) {
+			addPanel(panel);
+		}
+
+		if (doc.last_viewed_panel) {
+			addPanel(doc.last_viewed_panel);
+		}
+
+		return Array.from(panelsById.values());
+	}
+
+	getPanelSyncUpdatedAt(panel) {
+		if (!panel || panel.deleted_at) {
+			return '';
+		}
+
+		return panel.content_updated_at || panel.updated_at || '';
+	}
+
+	isSyncRelevantPanel(panel) {
+		return Boolean(
+			panel &&
+			!panel.deleted_at &&
+			(
+				panel.template_slug ||
+				panel.type === 'enhanced_notes' ||
+				panel.title === 'Summary'
+			)
+		);
+	}
+
+	getDocumentSyncUpdatedAt(doc) {
+		const candidates = [];
+		const addCandidate = (timestamp) => {
+			if (!timestamp) {
+				return;
+			}
+
+			const time = new Date(timestamp).getTime();
+			if (Number.isNaN(time)) {
+				return;
+			}
+
+			candidates.push({ timestamp, time });
+		};
+
+		addCandidate(doc.updated_at);
+
+		for (const panel of this.getAllDocumentPanels(doc)) {
+			if (this.isSyncRelevantPanel(panel)) {
+				addCandidate(this.getPanelSyncUpdatedAt(panel));
+			}
+		}
+
+		if (candidates.length === 0) {
+			return doc.updated_at || doc.created_at || '';
+		}
+
+		candidates.sort((a, b) => b.time - a.time);
+		return candidates[0].timestamp;
+	}
+
+	getDocumentSyncReadiness(doc) {
+		if (typeof doc.meeting_end_count === 'number' && doc.meeting_end_count === 0) {
+			return { ready: false, reason: 'meeting is still in progress' };
+		}
+
+		const lastActivityAt = doc.updated_at || doc.created_at;
+		if (!lastActivityAt) {
+			return { ready: true, reason: '' };
+		}
+
+		const lastActivityTime = new Date(lastActivityAt).getTime();
+		if (Number.isNaN(lastActivityTime)) {
+			return { ready: true, reason: '' };
+		}
+
+		const ageMs = Date.now() - lastActivityTime;
+		if (ageMs < POST_MEETING_SYNC_DELAY_MS) {
+			const remainingSeconds = Math.ceil((POST_MEETING_SYNC_DELAY_MS - ageMs) / 1000);
+			return {
+				ready: false,
+				reason: `waiting for Granola processing to settle (${remainingSeconds}s remaining)`
+			};
+		}
+
+		return { ready: true, reason: '' };
+	}
+
 	async ensureGranolaTemplateForDocument(doc, authContext) {
 		if (!this.shouldUseGranolaTemplateManagement()) {
 			return doc;
@@ -2613,6 +2741,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const docId = doc.id;
 		let frontmatter = '---\n';
 		const additionalFrontmatterKeys = this.getAdditionalFrontmatterKeys();
+		const syncUpdatedAt = this.getDocumentSyncUpdatedAt(doc);
 		
 		// granola_id is always included (required for duplicate detection)
 		frontmatter += 'granola_id: ' + docId + '\n';
@@ -2633,9 +2762,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (doc.created_at) {
 				frontmatter += 'created_at: ' + this.formatFrontmatterDate(doc.created_at) + '\n';
 			}
-			if (doc.updated_at) {
-				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(doc.updated_at) + '\n';
+			if (syncUpdatedAt) {
+				frontmatter += 'updated_at: ' + this.formatFrontmatterDate(syncUpdatedAt) + '\n';
 			}
+		}
+
+		if (syncUpdatedAt && !additionalFrontmatterKeys.has('granola_updated_at')) {
+			frontmatter += 'granola_updated_at: ' + syncUpdatedAt + '\n';
 		}
 
 		if (this.settings.mapMetadataToFrontmatter) {
@@ -2688,15 +2821,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	async isNoteOutdated(existingFile, doc) {
-		if (!doc.updated_at) return false;
+		const syncUpdatedAt = this.getDocumentSyncUpdatedAt(doc);
+		if (!syncUpdatedAt) return false;
 		try {
 			const content = await this.app.vault.read(existingFile);
 			const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
 			if (frontmatterMatch) {
+				const granolaUpdatedAtMatch = frontmatterMatch[1].match(/granola_updated_at:\s*(.+)$/m);
 				const updatedAtMatch = frontmatterMatch[1].match(/updated_at:\s*(.+)$/m);
-				if (updatedAtMatch) {
-					const existingDate = new Date(updatedAtMatch[1].trim());
-					const granolaDate = new Date(doc.updated_at);
+				const storedUpdatedAt = granolaUpdatedAtMatch ? granolaUpdatedAtMatch[1].trim() : updatedAtMatch ? updatedAtMatch[1].trim() : '';
+				if (storedUpdatedAt) {
+					const existingDate = new Date(storedUpdatedAt);
+					const granolaDate = new Date(syncUpdatedAt);
 					return granolaDate > existingDate;
 				}
 			}
