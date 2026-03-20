@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+### Changed
+- **📝 Existing note behavior modes**: Replaced the old "Skip Existing Notes" toggle with a clearer three-mode setting:
+  - `Never update existing notes`
+  - `Update when Granola changed`
+  - `Always rewrite existing notes`
+- **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode
+
 ## [1.9.3] - 2026-02-15
 ### Changed
 - **Plugin ID renamed**: Changed plugin ID from `granola-sync` to `granola-sync-plus` for community plugin catalog submission (existing ID was already taken)

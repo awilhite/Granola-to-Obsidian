@@ -25,11 +25,12 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🏷️ Attendee Tagging**: Automatically extract meeting attendees and add them as organized tags (e.g., `person/john-smith`)
 - **🔗 Granola URL Links**: Add direct links back to original Granola notes in frontmatter for easy access
 - **🔧 Smart Filtering**: Exclude your own name from attendee tags with configurable settings
-- **🛡️ Preserve Manual Additions**: Option to skip updating existing notes, preserving your tags, summaries, and custom properties
+- **🛡️ Preserve Manual Additions**: Keep existing notes untouched or refresh them only when Granola changes
 - **✨ Rich Metadata**: Includes frontmatter with creation/update dates and Granola IDs
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
+- **📝 Existing Note Modes**: Choose whether existing notes are never updated, updated only when Granola changed, or always rewritten
 - **⚙️ Customizable Filename Separators**: Choose how words are separated in filenames (underscore, dash, or no separator)
 - **🛡️ Smart File Conflict Handling**: Skip duplicate filenames or create timestamped versions automatically
 - **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
@@ -204,22 +205,20 @@ Identify and manage duplicate notes that may have been created across multiple s
 
 **Note**: This uses the `granola_id` in frontmatter to identify duplicates, so renamed files are correctly recognized.
 
-### Skip Existing Notes
-When enabled, notes that already exist in your vault will not be updated during sync. This is perfect for preserving any manual additions you've made such as:
-- Custom tags
-- Personal summaries
-- Additional notes or comments
-- Custom frontmatter properties
+### Existing Note Behavior
+Choose how the plugin should handle a note when another note with the same `granola_id` already exists:
 
-**How it works**: The plugin uses the `granola_id` in the frontmatter to identify existing notes, so you can safely:
+- **Never update existing notes**: Leave existing notes completely untouched
+- **Update when Granola changed**: Rewrite existing notes only when Granola's `updated_at` is newer than the synced note
+- **Always rewrite existing notes**: Rewrite existing notes on every sync pass
+
+This setting uses the `granola_id` in frontmatter, so you can still safely:
 - Rename note files
 - Change filename templates
 - Modify note titles
-- Move notes within the sync directory
+- Move notes within the configured search scope
 
-As long as you don't modify the `granola_id` field, the plugin will recognize them as the same note.
-
-**Note**: New notes from Granola will still be imported, but existing ones won't be overwritten.
+As long as you don't modify the `granola_id` field, the plugin will recognize the note as the same meeting.
 
 ### Duplicate Detection & File Management
 
@@ -330,16 +329,16 @@ The plugin extracts attendee names from:
 - Email addresses (converts to readable names when needed)
 
 #### Automatic Updates
-When both "Skip Existing Notes" and "Include Attendee Tags" are enabled:
-- **Content preserved**: Your manual edits, summaries, and custom properties remain untouched
-- **Tags updated**: Attendee tags are refreshed based on current meeting data
-- **Non-person tags preserved**: Your custom tags are kept alongside attendee tags
+Attendee tags update whenever the plugin rewrites the note:
+- **Never update existing notes**: Existing notes stay untouched, including tags
+- **Update when Granola changed**: Tags refresh only when Granola has changed
+- **Always rewrite existing notes**: Tags refresh on every sync pass
 
 **Example workflow:**
 1. Enable attendee tagging in settings
 2. Set your name (e.g., "Danny McClelland") to exclude from tags
-3. Run sync - existing notes get attendee tags, content stays the same
-4. Future syncs keep attendee tags current while preserving your edits
+3. Choose your preferred existing note behavior
+4. Run sync and let attendee tags follow the same rewrite policy as the rest of the note
 
 ### Preview Your Settings
 Use the preview buttons in settings to see how your filename template and date format will look before syncing.
@@ -407,7 +406,7 @@ Your converted meeting content appears here in clean Markdown format.
 - **Your name still appears in tags**: Update "My Name" setting to match exactly how it appears in Granola
 - **Missing attendees**: Some meeting platforms may not provide complete attendee information
 - **Duplicate tags**: The plugin automatically prevents duplicate tags - check for variations in name formatting
-- **Tags not updating**: Ensure both "Skip Existing Notes" and "Include Attendee Tags" are enabled for updates
+- **Tags not updating**: Check your "Existing note behavior" setting. Tags only refresh when the note is being rewritten.
 
 ### Duplicate Notes Issues
 - **Seeing duplicates**: Use "Find Duplicate Granola Notes" command to identify and review them

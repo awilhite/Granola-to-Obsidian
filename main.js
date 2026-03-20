@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS = {
 	dailyNoteSectionName: '## Granola Meetings',
 	enablePeriodicNoteIntegration: false,
 	periodicNoteSectionName: '## Granola Meetings',
-	skipExistingNotes: true,
+	existingNoteBehavior: 'changed', // 'never', 'changed', 'always'
 	includeAttendeeTags: false,
 	excludeMyNameFromTags: true,
 	myName: 'Danny McClelland',
@@ -65,7 +65,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		try {
 			const data = await this.loadData();
 			if (data) {
-				this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+				this.settings = this.normalizeSettings(data);
+				if (JSON.stringify(data) !== JSON.stringify(this.settings)) {
+					await this.saveData(this.settings);
+				}
+			} else {
+				this.settings = this.normalizeSettings();
 			}
 		} catch (error) {
 			// Could not load settings, using defaults
@@ -117,6 +122,20 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	onunload() {
 		this.clearAutoSync();
+	}
+
+	normalizeSettings(data = {}) {
+		const normalized = Object.assign({}, DEFAULT_SETTINGS, data);
+		if (!['never', 'changed', 'always'].includes(normalized.existingNoteBehavior)) {
+			if (typeof data.skipExistingNotes === 'boolean') {
+				normalized.existingNoteBehavior = data.skipExistingNotes ? 'changed' : 'always';
+			} else {
+				normalized.existingNoteBehavior = DEFAULT_SETTINGS.existingNoteBehavior;
+			}
+		}
+
+		delete normalized.skipExistingNotes;
+		return normalized;
 	}
 
 	async saveSettings() {
@@ -190,6 +209,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (frequency < 60000) return (frequency / 1000) + ' seconds';
 		if (minutes < 60) return minutes + ' minutes';
 		return hours + ' hours';
+	}
+
+	getExistingNoteBehavior() {
+		return this.settings.existingNoteBehavior || DEFAULT_SETTINGS.existingNoteBehavior;
 	}
 
 	// Helper function to get a readable speaker label
@@ -800,7 +823,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * - 'specificFolders': Searches within user-specified folders (including subfolders)
 	 * 
 	 * This allows users to move their Granola notes to different folders while still
-	 * avoiding duplicates when "Skip Existing Notes" is enabled.
+	 * avoiding duplicates when existing notes are matched by Granola ID.
 	 * 
 	 * @param {string} granolaId - The Granola ID to search for
 	 * @returns {TFile|null} The found file or null if not found
@@ -1158,22 +1181,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const existingFile = await this.findExistingNoteByGranolaId(docId);
 
 		if (existingFile) {
-			if (this.settings.skipExistingNotes) {
-				// Check if the Granola document has been updated since the note was last synced
-				const outdated = await this.isNoteOutdated(existingFile, doc);
+			const existingNoteBehavior = this.getExistingNoteBehavior();
+			if (existingNoteBehavior === 'never') {
+				return true;
+			}
 
+			if (existingNoteBehavior === 'changed') {
+				const outdated = await this.isNoteOutdated(existingFile, doc);
 				if (!outdated) {
-					// Note is up to date - only update metadata if needed
-					if (this.settings.includeAttendeeTags || this.settings.includeGranolaUrl) {
-						try {
-							await this.updateExistingNoteMetadata(existingFile, doc);
-						} catch (error) {
-							console.error('Error updating metadata for existing note:', error);
-						}
-					}
 					return true;
 				}
-				// Note is outdated - fall through to full update
+
 				console.log('Note "' + title + '" has been updated in Granola, re-syncing...');
 			}
 
@@ -1919,41 +1937,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
-	async updateExistingNoteMetadata(file, doc) {
-		try {
-			// Extract all metadata
-			const attendeeNames = this.extractAttendeeNames(doc);
-			const attendeeTags = this.generateAttendeeTags(attendeeNames);
-			const folderNames = this.extractFolderNames(doc);
-			const folderTags = this.generateFolderTags(folderNames);
-			const granolaUrl = this.generateGranolaUrl(doc.id);
-
-			// Use FileManager.processFrontMatter for atomic frontmatter updates
-			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-				// Preserve existing tags that are not person or folder tags
-				const existingTags = frontmatter.tags || [];
-				const preservedTags = existingTags.filter(
-				    (tag) => !attendeeTags.includes(tag) && !folderTags.includes(tag)
-				);
-
-				// Combine attendee and folder tags
-				const newTags = [...attendeeTags, ...folderTags];
-
-				// Update tags
-				frontmatter.tags = [...preservedTags, ...newTags];
-
-				// Update or add Granola URL if enabled
-				if (granolaUrl) {
-					frontmatter.granola_url = granolaUrl;
-				}
-			});
-
-		} catch (error) {
-			console.error('Error updating attendee tags for existing note:', error);
-			throw error;
-		}
-	}
-
 	async reorganizeExistingNotes(quiet = false) {
 		try {
 			this.updateStatusBar('Syncing');
@@ -2279,12 +2262,15 @@ class GranolaSyncSettingTab extends obsidian.PluginSettingTab {
 		}
 
 		new obsidian.Setting(containerEl)
-			.setName('Skip existing notes')
-			.setDesc('When enabled, notes that already exist will not be updated during sync. This preserves any manual tags, summaries, or other additions you\'ve made.')
-			.addToggle(toggle => {
-				toggle.setValue(this.plugin.settings.skipExistingNotes);
-				toggle.onChange(async (value) => {
-					this.plugin.settings.skipExistingNotes = value;
+			.setName('Existing note behavior')
+			.setDesc('Choose what to do when a note with the same Granola ID already exists in your vault.')
+			.addDropdown(dropdown => {
+				dropdown.addOption('never', 'Never update existing notes');
+				dropdown.addOption('changed', 'Update when Granola changed');
+				dropdown.addOption('always', 'Always rewrite existing notes');
+				dropdown.setValue(this.plugin.getExistingNoteBehavior());
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.existingNoteBehavior = value;
 					await this.plugin.saveSettings();
 				});
 			});
