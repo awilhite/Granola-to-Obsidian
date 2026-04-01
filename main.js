@@ -1239,7 +1239,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return { metadata: null, content: markdown || '' };
 		}
 
-		const match = markdown.match(/^(?:### Metadata\s*\n+)?(?:```json\s*\n)?\s*({[\s\S]*?})\s*(?:\n```)?\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/);
+		const match = markdown.match(/^(?:#{1,6}\s*Metadata\s*\n+)?(?:```json\s*\n)?\s*({[\s\S]*?})\s*(?:\n```)?\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/i);
 		if (!match) {
 			return { metadata: null, content: markdown };
 		}
