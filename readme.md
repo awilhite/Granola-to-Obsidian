@@ -26,7 +26,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🔗 Granola URL Links**: Add direct links back to original Granola notes in frontmatter for easy access
 - **🔧 Smart Filtering**: Exclude your own name from attendee tags with configurable settings
 - **🛡️ Preserve Manual Additions**: Keep existing notes untouched or refresh them only when Granola changes
-- **✨ Rich Metadata**: Includes frontmatter with creation/update dates and Granola IDs
+- **✨ Rich Metadata**: Includes a canonical `date` property plus Granola source timestamps and IDs
 - **🧩 Metadata Mapping**: Map Granola's inline metadata block into frontmatter fields like `org`, `people`, `topics`, and `meeting_type`
 - **🔗 Metadata Templates**: Format mapped org and people values with templates such as `[[Reference/{name}]]`
 - **✅ Review Task**: Optionally add a review task near the top of each synced meeting note
@@ -424,6 +424,7 @@ Synced notes include rich frontmatter with metadata:
 granola_id: abc123def456
 title: "Team Standup Meeting"
 granola_url: "https://notes.granola.ai/d/abc123def456"
+date: 2025-06-06
 created_at: 2025-06-06T14:30:00.000Z
 updated_at: 2025-06-06T15:45:00.000Z
 org: "[[Organizations/Acme]]"
