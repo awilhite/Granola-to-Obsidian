@@ -1267,7 +1267,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return { metadata: null, content: markdown || '' };
 		}
 
-		const match = markdown.match(/^(?:#{1,6}\s*Metadata\s*\n+)?(?:```json\s*\n)?\s*({[\s\S]*?})\s*(?:\n```)?\s*(?=\n#{1,6}\s|\nChat with meeting transcript:|$)/i);
+		const match = markdown.match(/^(?:#{1,6}\s*Metadata\s*\n+)?(?:```json\s*\n)?\s*({[\s\S]*?})\s*(?:\n```)?\s*(?=\n---\s*(?:\n|$)|\n#{1,6}\s|\nChat with meeting transcript:|$)/i);
 		if (!match) {
 			return { metadata: null, content: markdown };
 		}
@@ -1744,7 +1744,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
 		if (!enhancedNotesContent) {
-			return '';
+			// Some docs return the visible summary panel as raw markdown in
+			// last_viewed_panel.content instead of a ProseMirror doc.
+			return this.getPanelMarkdownContent(doc.last_viewed_panel);
 		}
 
 		return this.convertProseMirrorToMarkdown(enhancedNotesContent).trim();
