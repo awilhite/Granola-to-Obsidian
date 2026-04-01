@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
   - `Update when Granola changed`
   - `Always rewrite existing notes`
 - **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode
+- **📅 Canonical note date**: Synced notes now include a `date` property derived from the meeting date for better Obsidian Bases and table compatibility
 
 ## [1.9.3] - 2026-02-15
 ### Changed

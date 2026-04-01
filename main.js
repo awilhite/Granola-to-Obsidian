@@ -633,10 +633,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		frontmatter += 'granola_transcript: true\n';
 		frontmatter += 'source: "Granola"\n';
 		const syncUpdatedAt = this.getDocumentSyncUpdatedAt(doc);
+		const noteDate = this.formatObsidianDateProperty(doc.created_at);
 
 		if (this.settings.includeTitle) {
 			const escapedTitle = title.replace(/"/g, '\\"');
 			frontmatter += 'title: "' + escapedTitle + ' Transcript"\n';
+		}
+
+		if (noteDate) {
+			frontmatter += 'date: ' + noteDate + '\n';
 		}
 
 		if (this.settings.includeDates) {
@@ -2685,6 +2690,19 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 	}
 
+	formatObsidianDateProperty(dateString) {
+		if (!dateString) return '';
+
+		try {
+			const date = new Date(dateString);
+			if (isNaN(date.getTime())) return '';
+			return date.toISOString().split('T')[0];
+		} catch (error) {
+			console.error('Error formatting Obsidian date property:', error);
+			return '';
+		}
+	}
+
 	/**
 	 * Apply a custom date format string to a date
 	 * Supports: YYYY, MM, DD, HH, mm, ss
@@ -2760,6 +2778,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		let frontmatter = '---\n';
 		const additionalFrontmatterKeys = this.getAdditionalFrontmatterKeys();
 		const syncUpdatedAt = this.getDocumentSyncUpdatedAt(doc);
+		const noteDate = this.formatObsidianDateProperty(doc.created_at);
 		
 		// granola_id is always included (required for duplicate detection)
 		frontmatter += 'granola_id: ' + docId + '\n';
@@ -2773,6 +2792,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		// Granola URL (optional based on existing setting)
 		if (granolaUrl) {
 			frontmatter += 'granola_url: "' + granolaUrl + '"\n';
+		}
+
+		if (noteDate && !additionalFrontmatterKeys.has('date')) {
+			frontmatter += 'date: ' + noteDate + '\n';
 		}
 		
 		// Dates (optional based on settings)
