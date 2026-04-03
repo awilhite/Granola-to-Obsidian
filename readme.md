@@ -180,12 +180,13 @@ Control whether your own Granola-authored notes appear above the generated summa
 
 #### Behavior:
 - The plugin places `## My Notes` near the top of the note, after the title and optional review task
-- If Granola's public sync payload does not expose a `my_notes` panel, the plugin falls back to private document fields such as `notes_markdown`
+- If Granola's public sync payload does not expose a `my_notes` panel, the plugin falls back to private document fields such as Granola's structured `notes` document and then `notes_markdown`
 - If you did not write any notes for a meeting, no `## My Notes` section is added
 
 #### Benefits:
 - **High-signal first**: Surface your own observations before the AI-generated synthesis
 - **Fewer misses**: Still captures your notes even when Granola stores them outside the public panel payload
+- **Closer to Granola**: Preserve authored-note paragraph spacing more faithfully by rendering from Granola's structured note content when available
 - **Better pairing**: Keeps authored notes and enhanced notes adjacent in the same meeting note
 
 ### Transcript Options

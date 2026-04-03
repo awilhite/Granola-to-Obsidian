@@ -1683,18 +1683,85 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return null;
 	}
 
+	extractAuthoredNoteInlineText(node) {
+		if (!node || typeof node !== 'object') {
+			return '';
+		}
+
+		if (node.type === 'text') {
+			return node.text || '';
+		}
+
+		if (node.type === 'hardBreak') {
+			return '\n';
+		}
+
+		if (!Array.isArray(node.content)) {
+			return '';
+		}
+
+		return node.content.map((child) => this.extractAuthoredNoteInlineText(child)).join('');
+	}
+
+	renderAuthoredNotesDoc(docContent) {
+		if (!docContent || docContent.type !== 'doc' || !Array.isArray(docContent.content)) {
+			return '';
+		}
+
+		const lines = [];
+		let previousWasBlank = false;
+
+		for (const node of docContent.content) {
+			if (!node || typeof node !== 'object') {
+				continue;
+			}
+
+			if (node.type !== 'paragraph') {
+				const fallbackText = this.extractAuthoredNoteInlineText(node).trim();
+				if (!fallbackText) {
+					continue;
+				}
+				lines.push(fallbackText);
+				previousWasBlank = false;
+				continue;
+			}
+
+			const paragraphText = this.extractAuthoredNoteInlineText(node).trim();
+			if (!paragraphText) {
+				if (lines.length > 0 && !previousWasBlank) {
+					lines.push('');
+					previousWasBlank = true;
+				}
+				continue;
+			}
+
+			lines.push(paragraphText);
+			previousWasBlank = false;
+		}
+
+		while (lines.length > 0 && lines[0] === '') {
+			lines.shift();
+		}
+
+		while (lines.length > 0 && lines[lines.length - 1] === '') {
+			lines.pop();
+		}
+
+		return lines.join('\n');
+	}
+
 	getMyNotesMarkdown(doc) {
 		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
 		if (myNotesContent) {
-			return this.convertProseMirrorToMarkdown(myNotesContent).trim();
+			return this.renderAuthoredNotesDoc(myNotesContent);
+		}
+
+		if (doc.notes && doc.notes.type === 'doc') {
+			return this.renderAuthoredNotesDoc(doc.notes);
 		}
 
 		if (typeof doc.notes_markdown === 'string' && doc.notes_markdown.trim()) {
 			return doc.notes_markdown.trim();
-		}
-
-		if (doc.notes && doc.notes.type === 'doc') {
-			return this.convertProseMirrorToMarkdown(doc.notes).trim();
 		}
 
 		if (typeof doc.notes_plain === 'string' && doc.notes_plain.trim()) {
