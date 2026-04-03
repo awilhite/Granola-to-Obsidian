@@ -36,6 +36,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
 - **📝 Existing Note Modes**: Choose whether existing notes are never updated, updated only when Granola changed, or always rewritten
+- **🖊️ Authored Notes Section**: Pull your own Granola notes into a dedicated `## My Notes` section at the top of synced meeting notes
 - **⚙️ Customizable Filename Separators**: Choose how words are separated in filenames (underscore, dash, or no separator)
 - **🛡️ Smart File Conflict Handling**: Skip duplicate filenames or create timestamped versions automatically
 - **📁 Granola Folder Organization**: Mirror your Granola folder structure in Obsidian with automatic folder-based tagging
@@ -169,6 +170,23 @@ Map Granola's inline `### Metadata` block into structured frontmatter fields for
 - **Structured properties**: Turn machine-generated metadata into first-class Obsidian properties
 - **Reference-friendly**: Point `org` and `people` directly at linked reference notes
 - **Cleaner note bodies**: Remove the raw metadata JSON block after extraction
+
+### My Notes
+
+Control whether your own Granola-authored notes appear above the generated summary.
+
+#### Setting:
+- **Include My Notes**: Add a `## My Notes` section containing the notes you wrote yourself during the meeting
+
+#### Behavior:
+- The plugin places `## My Notes` near the top of the note, after the title and optional review task
+- If Granola's public sync payload does not expose a `my_notes` panel, the plugin falls back to private document fields such as `notes_markdown`
+- If you did not write any notes for a meeting, no `## My Notes` section is added
+
+#### Benefits:
+- **High-signal first**: Surface your own observations before the AI-generated synthesis
+- **Fewer misses**: Still captures your notes even when Granola stores them outside the public panel payload
+- **Better pairing**: Keeps authored notes and enhanced notes adjacent in the same meeting note
 
 ### Transcript Options
 

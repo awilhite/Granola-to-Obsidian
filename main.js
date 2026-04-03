@@ -1683,6 +1683,27 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return null;
 	}
 
+	getMyNotesMarkdown(doc) {
+		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
+		if (myNotesContent) {
+			return this.convertProseMirrorToMarkdown(myNotesContent).trim();
+		}
+
+		if (typeof doc.notes_markdown === 'string' && doc.notes_markdown.trim()) {
+			return doc.notes_markdown.trim();
+		}
+
+		if (doc.notes && doc.notes.type === 'doc') {
+			return this.convertProseMirrorToMarkdown(doc.notes).trim();
+		}
+
+		if (typeof doc.notes_plain === 'string' && doc.notes_plain.trim()) {
+			return doc.notes_plain.trim();
+		}
+
+		return '';
+	}
+
 	shouldUseGranolaTemplateManagement() {
 		return Boolean(this.settings.enableGranolaTemplateManagement && this.settings.granolaTemplateId);
 	}
@@ -1941,6 +1962,38 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return doc;
 	}
 
+	async ensureGranolaMyNotesForDocument(doc, authContext) {
+		if (!this.settings.includeMyNotes) {
+			return doc;
+		}
+
+		if (this.getMyNotesMarkdown(doc)) {
+			return doc;
+		}
+
+		try {
+			const client = this.getGranolaPrivateClient(authContext);
+			const batchDoc = await client.getDocumentBatch(doc.id);
+			if (!batchDoc) {
+				return doc;
+			}
+
+			if (typeof batchDoc.notes_markdown === 'string') {
+				doc.notes_markdown = batchDoc.notes_markdown;
+			}
+			if (typeof batchDoc.notes_plain === 'string') {
+				doc.notes_plain = batchDoc.notes_plain;
+			}
+			if (batchDoc.notes && typeof batchDoc.notes === 'object') {
+				doc.notes = batchDoc.notes;
+			}
+		} catch (error) {
+			console.error('Error fetching Granola authored notes for "' + (doc.title || doc.id) + '":', error);
+		}
+
+		return doc;
+	}
+
 	/**
 	 * Builds the note content from available sections.
 	 * Includes My Notes, Enhanced Notes, and Transcript based on settings and availability.
@@ -1961,12 +2014,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Extract My Notes content
-		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
-		if (myNotesContent && this.settings.includeMyNotes) {
-			const myNotesMarkdown = this.convertProseMirrorToMarkdown(myNotesContent);
-			if (myNotesMarkdown && myNotesMarkdown.trim()) {
-				sections.push('\n## My Notes\n\n' + myNotesMarkdown.trim());
-			}
+		const myNotesMarkdown = this.getMyNotesMarkdown(doc);
+		if (myNotesMarkdown && this.settings.includeMyNotes) {
+			sections.push('\n## My Notes\n\n' + myNotesMarkdown.trim());
 		}
 
 		// Extract Enhanced Notes content
@@ -1981,7 +2031,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						: enhancedNotesMarkdown;
 
 				// If we have My Notes, add Enhanced Notes as a separate section
-			if (myNotesContent && this.settings.includeMyNotes) {
+			if (myNotesMarkdown && this.settings.includeMyNotes) {
 				sections.push('\n## Enhanced Notes\n\n' + enhancedBodyMarkdown.trim());
 			} else {
 				// If no My Notes, just add the enhanced notes content directly
@@ -2006,14 +2056,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const transcript = doc.transcript || 'no_transcript';
 
 		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
+		doc = await this.ensureGranolaMyNotesForDocument(doc, authContext);
 
 		// Extract all available content
-		const myNotesContent = this.extractPanelContent(doc, 'my_notes');
+		const myNotesMarkdown = this.getMyNotesMarkdown(doc);
 		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
 		const hasTranscript = this.shouldFetchTranscript() && transcript && transcript !== 'no_transcript';
 
 		// Check if there's any content to process
-		const hasMyNotes = myNotesContent && this.settings.includeMyNotes;
+		const hasMyNotes = myNotesMarkdown && this.settings.includeMyNotes;
 		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
 
 		// If no content is available at all, skip this document
