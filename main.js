@@ -69,6 +69,7 @@ const DEFAULT_SETTINGS = {
 const REVIEW_TASK_TEXT = '- [ ] Review imported Granola note';
 const GRANOLA_TEMPLATE_CLIENT_VERSION = '7.71.1';
 const POST_MEETING_SYNC_DELAY_MS = 2 * 60 * 1000;
+const MAX_SYNC_DIAGNOSTIC_HISTORY = 10;
 
 function safeJsonParse(value, fallback = null) {
 	if (value === null || value === undefined) {
@@ -344,6 +345,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		this.settings = DEFAULT_SETTINGS;
 		this.statusBarItem = null;
 		this.ribbonIconEl = null;
+		this.syncInProgress = false;
+		this.syncRunSequence = 0;
+		this.syncDiagnosticsHistory = [];
+		this.lastSyncDiagnostics = null;
+		this.currentSyncFileIndex = null;
 		
 		try {
 			const data = await this.loadData();
@@ -364,7 +370,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		// Add ribbon icon for syncing
 		this.ribbonIconEl = this.addRibbonIcon('sync', 'Sync Granola notes', () => {
-			this.syncNotes();
+			this.syncNotes('ribbon');
 		});
 
 		// Add ribbon icon for finding duplicates
@@ -376,7 +382,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			id: 'sync-granola-notes',
 			name: 'Sync Granola Notes',
 			callback: () => {
-				this.syncNotes();
+				this.syncNotes('command');
 			}
 		});
 
@@ -393,6 +399,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			name: 'Reorganize Granola Notes into Folders',
 			callback: () => {
 				this.reorganizeExistingNotes();
+			}
+		});
+
+		this.addCommand({
+			id: 'show-granola-sync-diagnostics',
+			name: 'Show Granola Sync Diagnostics',
+			callback: () => {
+				this.showLastSyncDiagnostics();
 			}
 		});
 
@@ -476,7 +490,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		
 		if (this.settings.autoSyncFrequency > 0) {
 			this.autoSyncInterval = window.setInterval(() => {
-				this.syncNotes();
+				this.syncNotes('auto');
 			}, this.settings.autoSyncFrequency);
 		}
 	}
@@ -486,6 +500,81 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			window.clearInterval(this.autoSyncInterval);
 			this.autoSyncInterval = null;
 		}
+	}
+
+	createSyncDiagnostics(source) {
+		return {
+			runId: ++this.syncRunSequence,
+			source: source || 'manual',
+			startedAt: new Date().toISOString(),
+			durationMs: 0,
+			docsFetched: 0,
+			docsToSync: 0,
+			docsSkippedNotReady: 0,
+			docsProcessed: 0,
+			syncedCount: 0,
+			transcriptFetches: 0,
+			myNotesHydrations: 0,
+			indexBuildMs: 0,
+			indexFilesScanned: 0,
+			indexGranolaNotes: 0,
+			indexTranscriptNotes: 0,
+			indexReadErrors: 0,
+			findByIdLookups: 0,
+			findByIdCacheHits: 0,
+			templateStats: { attempted: 0, applied: 0, failed: 0, skipped: 0 },
+			overlapSkipped: false,
+			error: null,
+		};
+	}
+
+	recordSyncDiagnostics(diagnostics) {
+		if (!diagnostics) {
+			return;
+		}
+
+		diagnostics.endedAt = new Date().toISOString();
+		if (diagnostics.startedAt) {
+			diagnostics.durationMs = Date.now() - new Date(diagnostics.startedAt).getTime();
+		}
+
+		this.lastSyncDiagnostics = diagnostics;
+		this.syncDiagnosticsHistory.push(diagnostics);
+		if (this.syncDiagnosticsHistory.length > MAX_SYNC_DIAGNOSTIC_HISTORY) {
+			this.syncDiagnosticsHistory.shift();
+		}
+
+		console.log('Granola Sync diagnostics:', diagnostics);
+	}
+
+	formatSyncDiagnosticsSummary(diagnostics) {
+		if (!diagnostics) {
+			return 'No sync diagnostics available yet.';
+		}
+
+		const duration = diagnostics.durationMs ? `${(diagnostics.durationMs / 1000).toFixed(1)}s` : 'n/a';
+		return [
+			`run ${diagnostics.runId}`,
+			`${diagnostics.source}`,
+			`${duration}`,
+			`docs ${diagnostics.docsFetched}/${diagnostics.docsToSync}`,
+			`synced ${diagnostics.syncedCount}`,
+			`ready-skips ${diagnostics.docsSkippedNotReady}`,
+			`transcripts ${diagnostics.transcriptFetches}`,
+			`my-notes ${diagnostics.myNotesHydrations}`,
+			`index ${diagnostics.indexGranolaNotes}+${diagnostics.indexTranscriptNotes}`,
+			diagnostics.error ? `error ${diagnostics.error}` : null,
+		].filter(Boolean).join(' | ');
+	}
+
+	showLastSyncDiagnostics() {
+		if (!this.lastSyncDiagnostics) {
+			new obsidian.Notice('No Granola sync diagnostics available yet.');
+			return;
+		}
+
+		console.log('Granola Sync last diagnostics:', this.lastSyncDiagnostics);
+		new obsidian.Notice(this.formatSyncDiagnosticsSummary(this.lastSyncDiagnostics), 10000);
 	}
 
 	getFrequencyLabel(frequency) {
@@ -670,32 +759,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	async findExistingTranscriptNoteByGranolaId(docId) {
+		if (this.currentSyncFileIndex && this.currentSyncFileIndex.transcriptById.has(docId)) {
+			return this.currentSyncFileIndex.transcriptById.get(docId);
+		}
+
 		const transcriptDirectory = this.normalizeVaultPath(this.settings.transcriptDirectory);
 		const files = this.app.vault.getMarkdownFiles().filter(file =>
 			file.path === transcriptDirectory || file.path.startsWith(transcriptDirectory + '/')
 		);
-
-		for (const file of files) {
-			try {
-				const content = await this.app.vault.read(file);
-				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-				if (!frontmatterMatch) {
-					continue;
-				}
-
-				const frontmatter = frontmatterMatch[1];
-				const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
-				const transcriptMatch = frontmatter.match(/granola_transcript:\s*true$/m);
-
-				if (granolaIdMatch && transcriptMatch && granolaIdMatch[1].trim() === docId) {
-					return file;
-				}
-			} catch (error) {
-				console.error('Error reading transcript note for duplicate detection:', file.path, error);
-			}
-		}
-
-		return null;
+		const index = await this.buildGranolaFileIndex(files);
+		return index.transcriptById.get(docId) || null;
 	}
 
 	async writeSeparateTranscriptNote(doc, transcript) {
@@ -707,6 +780,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const existingTranscript = await this.findExistingTranscriptNoteByGranolaId(doc.id || 'unknown_id');
 		if (existingTranscript) {
 			await this.app.vault.modify(existingTranscript, transcriptContent);
+			this.registerGranolaFileIndexEntry(existingTranscript, doc.id || 'unknown_id', true);
 			return existingTranscript.path;
 		}
 
@@ -722,40 +796,71 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const uniqueFilename = baseFilename + ' Transcript ' + timestamp + '.md';
 			const finalFilepath = this.normalizeVaultPath(path.join(targetDirectory, uniqueFilename));
 			await this.app.vault.create(finalFilepath, transcriptContent);
+			const createdTranscript = this.app.vault.getAbstractFileByPath(finalFilepath);
+			if (createdTranscript) {
+				this.registerGranolaFileIndexEntry(createdTranscript, doc.id || 'unknown_id', true);
+			}
 			return finalFilepath;
 		}
 
 		await this.app.vault.create(filepath, transcriptContent);
+		const createdTranscript = this.app.vault.getAbstractFileByPath(filepath);
+		if (createdTranscript) {
+			this.registerGranolaFileIndexEntry(createdTranscript, doc.id || 'unknown_id', true);
+		}
 		return filepath;
 	}
 
-	async syncNotes() {
+	async syncNotes(source = 'manual') {
+		if (this.syncInProgress) {
+			const diagnostics = this.createSyncDiagnostics(source);
+			diagnostics.overlapSkipped = true;
+			diagnostics.error = 'sync already in progress';
+			this.recordSyncDiagnostics(diagnostics);
+			console.warn('Skipping Granola sync because a previous sync is still running');
+			if (source !== 'auto') {
+				new obsidian.Notice('Granola sync is already running.');
+			}
+			return false;
+		}
+
+		this.syncInProgress = true;
+		this.activeSyncDiagnostics = this.createSyncDiagnostics(source);
+
 		try {
 			this.updateStatusBar('Syncing');
 			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
-			
+
 			await this.ensureDirectoryExists();
 
 			const authContext = await this.loadCredentials();
 			if (!authContext) {
+				this.activeSyncDiagnostics.error = 'credentials failed';
 				this.updateStatusBar('Error', 'credentials failed');
-				return;
+				return false;
 			}
 
 			const documents = await this.fetchGranolaDocuments(authContext);
 			if (!documents) {
+				this.activeSyncDiagnostics.error = 'fetch failed';
 				this.updateStatusBar('Error', 'fetch failed');
-				return;
+				return false;
 			}
+			this.activeSyncDiagnostics.docsFetched = documents.length;
 
-			// Fetch folders if folder support or folder filtering is enabled
+			const fileIndex = await this.buildGranolaFileIndex(this.getFilesForExistingNoteSearch());
+			this.currentSyncFileIndex = fileIndex;
+			this.activeSyncDiagnostics.indexBuildMs = fileIndex.buildMs;
+			this.activeSyncDiagnostics.indexFilesScanned = fileIndex.filesScanned;
+			this.activeSyncDiagnostics.indexGranolaNotes = fileIndex.summaryById.size;
+			this.activeSyncDiagnostics.indexTranscriptNotes = fileIndex.transcriptById.size;
+			this.activeSyncDiagnostics.indexReadErrors = fileIndex.readErrors;
+
 			let folders = null;
 			if (this.settings.enableGranolaFolders || this.settings.enableFolderFilter) {
 				folders = await this.fetchGranolaFolders(authContext);
 				if (folders) {
-					// Create a mapping of document ID to folder for quick lookup
 					this.documentToFolderMap = {};
-					// Also store all available folders for the settings UI
 					this.availableGranolaFolders = folders;
 					for (const folder of folders) {
 						if (folder.document_ids) {
@@ -767,20 +872,18 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			// Filter documents by selected folders if folder filtering is enabled
 			let documentsToSync = documents;
 			if (this.settings.enableFolderFilter && this.settings.selectedGranolaFolders.length > 0 && this.documentToFolderMap) {
 				documentsToSync = documents.filter(doc => {
 					const folder = this.documentToFolderMap[doc.id];
 					if (!folder) {
-						// Document is not in any folder - check if user wants to include "unfiled" docs
 						return false;
 					}
-					// Check if the folder ID is in the selected folders list
 					return this.settings.selectedGranolaFolders.includes(folder.id);
 				});
 				console.log(`Folder filter: syncing ${documentsToSync.length} of ${documents.length} documents`);
 			}
+			this.activeSyncDiagnostics.docsToSync = documentsToSync.length;
 
 			let syncedCount = 0;
 			const todaysNotes = [];
@@ -791,39 +894,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				try {
 					const readiness = this.getDocumentSyncReadiness(doc);
 					if (!readiness.ready) {
+						this.activeSyncDiagnostics.docsSkippedNotReady++;
 						console.log('Skipping document "' + (doc.title || doc.id) + '" - ' + readiness.reason);
 						continue;
 					}
 
-					// Fetch transcript if enabled
-					if (this.shouldFetchTranscript()) {
-						const transcriptData = await this.fetchTranscript(authContext, doc.id);
-						doc.transcript = this.transcriptToMarkdown(transcriptData);
-					}
-
 					const success = await this.processDocument(doc, authContext);
+					this.activeSyncDiagnostics.docsProcessed++;
 					if (success) {
 						syncedCount++;
 					}
-					
-					// Check for note integration regardless of sync success
-					// This ensures existing notes from today are still included
+
 					if ((this.settings.enableDailyNoteIntegration || this.settings.enablePeriodicNoteIntegration) && doc.created_at) {
 						const noteDate = new Date(doc.created_at).toDateString();
 						if (noteDate === today) {
-							// Find the actual file that was created or already exists
-							const actualFile = await this.findExistingNoteByGranolaId(doc.id);
-							
+							const actualFile = await this.findExistingNoteByGranolaId(doc.id, { fileIndex: this.currentSyncFileIndex });
 							if (actualFile) {
 								const noteData = {};
 								noteData.title = doc.title || 'Untitled Granola Note';
-								noteData.actualFilePath = actualFile.path; // Use actual file path
-								
+								noteData.actualFilePath = actualFile.path;
+
 								const createdDate = new Date(doc.created_at);
 								const hours = String(createdDate.getHours()).padStart(2, '0');
 								const minutes = String(createdDate.getMinutes()).padStart(2, '0');
 								noteData.time = hours + ':' + minutes;
-								
+
 								todaysNotes.push(noteData);
 							}
 						}
@@ -833,9 +928,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 			}
 
-			// Create a deep copy to prevent any reference issues
-			const todaysNotesCopy = todaysNotes.map(note => ({...note}));
-			
+			this.activeSyncDiagnostics.syncedCount = syncedCount;
+			this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+
+			const todaysNotesCopy = todaysNotes.map(note => ({ ...note }));
 			if (this.settings.enableDailyNoteIntegration && todaysNotes.length > 0) {
 				await this.updateDailyNote(todaysNotesCopy);
 			}
@@ -852,19 +948,26 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				this.updateStatusBar('Complete', syncedCount);
 			}
 
-			// Auto-reorganize if enabled
 			if (this.settings.enableAutoReorganize &&
 				(this.settings.enableGranolaFolders || this.settings.enableDateBasedFolders)) {
 				try {
-					await this.reorganizeExistingNotes(true); // quiet mode
+					await this.reorganizeExistingNotes(true);
 				} catch (error) {
 					console.error('Auto-reorganization failed:', error);
 				}
 			}
 
+			return true;
 		} catch (error) {
 			console.error('Granola sync failed:', error);
+			this.activeSyncDiagnostics.error = error && error.message ? error.message : String(error);
 			this.updateStatusBar('Error', 'sync failed');
+			return false;
+		} finally {
+			this.recordSyncDiagnostics(this.activeSyncDiagnostics);
+			this.activeSyncDiagnostics = null;
+			this.currentSyncFileIndex = null;
+			this.syncInProgress = false;
 		}
 	}
 
@@ -1395,60 +1498,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	 * @param {boolean} options.includeTranscriptNotes - Whether transcript notes should be considered matches
 	 * @returns {TFile|null} The found file or null if not found
 	 */
-		async findExistingNoteByGranolaId(granolaId, options = {}) {
+	async findExistingNoteByGranolaId(granolaId, options = {}) {
 		const includeTranscriptNotes = options.includeTranscriptNotes === true;
-		let filesToSearch = [];
+		const fileIndex = options.fileIndex || this.currentSyncFileIndex;
+		const diagnostics = this.activeSyncDiagnostics;
 
-		if (this.settings.existingNoteSearchScope === 'entireVault') {
-			// Search all markdown files in the vault
-			filesToSearch = this.app.vault.getMarkdownFiles();
-		} else if (this.settings.existingNoteSearchScope === 'specificFolders') {
-			// Search in specific folders
-			if (this.settings.specificSearchFolders.length === 0) {
-			return null;
+		if (diagnostics) {
+			diagnostics.findByIdLookups++;
 		}
 
-			for (const folderPath of this.settings.specificSearchFolders) {
-				const folder = this.app.vault.getFolderByPath(folderPath);
-				if (folder) {
-					const folderFiles = this.getAllMarkdownFilesInFolder(folder);
-					filesToSearch = filesToSearch.concat(folderFiles);
-				}
+		if (fileIndex) {
+			const file = includeTranscriptNotes
+				? fileIndex.transcriptById.get(granolaId)
+				: fileIndex.summaryById.get(granolaId);
+			if (file && diagnostics) {
+				diagnostics.findByIdCacheHits++;
 			}
-		} else {
-			// Default: search only in sync directory (including subfolders)
-			const folder = this.app.vault.getFolderByPath(this.settings.syncDirectory);
-			if (!folder) {
-				return null;
-			}
-			// Use recursive search to find notes in subfolders (important for date-based or Granola folder organization)
-			filesToSearch = this.getAllMarkdownFilesInFolder(folder);
+			return file || null;
 		}
-		
-		for (const file of filesToSearch) {
-			try {
-				const content = await this.app.vault.read(file);
-				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-				
-				if (frontmatterMatch) {
-					const frontmatter = frontmatterMatch[1];
-					const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
-					const transcriptMatch = frontmatter.match(/granola_transcript:\s*true$/m);
-					
-					if (
-						granolaIdMatch &&
-						granolaIdMatch[1].trim() === granolaId &&
-						(includeTranscriptNotes || !transcriptMatch)
-					) {
-						return file;
-					}
-				}
-			} catch (error) {
-				console.error('Error reading file for Granola ID check:', file.path, error);
-			}
-		}
-		
-		return null;
+
+		const filesToSearch = this.getFilesForExistingNoteSearch();
+		const builtIndex = await this.buildGranolaFileIndex(filesToSearch);
+		const file = includeTranscriptNotes
+			? builtIndex.transcriptById.get(granolaId)
+			: builtIndex.summaryById.get(granolaId);
+		return file || null;
 	}
 
 	getAllMarkdownFilesInFolder(folder) {
@@ -1459,6 +1533,93 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return this.app.vault.getMarkdownFiles().filter(
 			(file) => file.path.startsWith(folderPath + '/')
 		);
+	}
+
+	getFilesForExistingNoteSearch() {
+		if (this.settings.existingNoteSearchScope === 'entireVault') {
+			return this.app.vault.getMarkdownFiles();
+		}
+
+		if (this.settings.existingNoteSearchScope === 'specificFolders') {
+			if (this.settings.specificSearchFolders.length === 0) {
+				return [];
+			}
+
+			let filesToSearch = [];
+			for (const folderPath of this.settings.specificSearchFolders) {
+				const folder = this.app.vault.getFolderByPath(folderPath);
+				if (folder) {
+					filesToSearch = filesToSearch.concat(this.getAllMarkdownFilesInFolder(folder));
+				}
+			}
+			return filesToSearch;
+		}
+
+		const folder = this.app.vault.getFolderByPath(this.settings.syncDirectory);
+		if (!folder) {
+			return [];
+		}
+
+		return this.getAllMarkdownFilesInFolder(folder);
+	}
+
+	async buildGranolaFileIndex(filesToSearch = null) {
+		const startedAt = Date.now();
+		const summaryById = new Map();
+		const transcriptById = new Map();
+		let readErrors = 0;
+		let filesScanned = 0;
+		const files = filesToSearch || this.getFilesForExistingNoteSearch();
+
+		for (const file of files) {
+			filesScanned++;
+			try {
+				const content = await this.app.vault.read(file);
+				const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+				if (!frontmatterMatch) {
+					continue;
+				}
+
+				const frontmatter = frontmatterMatch[1];
+				const granolaIdMatch = frontmatter.match(/granola_id:\s*(.+)$/m);
+				if (!granolaIdMatch) {
+					continue;
+				}
+
+				const granolaId = granolaIdMatch[1].trim();
+				const isTranscript = /granola_transcript:\s*true$/m.test(frontmatter);
+				if (isTranscript) {
+					if (!transcriptById.has(granolaId)) {
+						transcriptById.set(granolaId, file);
+					}
+				} else if (!summaryById.has(granolaId)) {
+					summaryById.set(granolaId, file);
+				}
+			} catch (error) {
+				readErrors++;
+				console.error('Error reading file for Granola ID index:', file.path, error);
+			}
+		}
+
+		return {
+			summaryById,
+			transcriptById,
+			filesScanned,
+			readErrors,
+			buildMs: Date.now() - startedAt,
+		};
+	}
+
+	registerGranolaFileIndexEntry(file, granolaId, isTranscript = false) {
+		if (!this.currentSyncFileIndex || !file || !granolaId) {
+			return;
+		}
+
+		if (isTranscript) {
+			this.currentSyncFileIndex.transcriptById.set(granolaId, file);
+		} else {
+			this.currentSyncFileIndex.summaryById.set(granolaId, file);
+		}
 	}
 
 	/**
@@ -2039,6 +2200,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		try {
+			if (this.activeSyncDiagnostics) {
+				this.activeSyncDiagnostics.myNotesHydrations++;
+			}
 			const client = this.getGranolaPrivateClient(authContext);
 			const batchDoc = await client.getDocumentBatch(doc.id);
 			if (!batchDoc) {
@@ -2120,28 +2284,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	try {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
-		const transcript = doc.transcript || 'no_transcript';
+		let transcript = doc.transcript || 'no_transcript';
 
 		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
-		doc = await this.ensureGranolaMyNotesForDocument(doc, authContext);
 
-		// Extract all available content
-		const myNotesMarkdown = this.getMyNotesMarkdown(doc);
 		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
-		const hasTranscript = this.shouldFetchTranscript() && transcript && transcript !== 'no_transcript';
-
-		// Check if there's any content to process
-		const hasMyNotes = myNotesMarkdown && this.settings.includeMyNotes;
 		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
 
-		// If no content is available at all, skip this document
-		if (!hasMyNotes && !hasEnhancedNotes && !hasTranscript) {
-			console.log('Skipping document "' + title + '" - no content available (no enhanced notes, my notes, or transcript)');
-			return false;
-		}
-
 		// Check if note already exists by Granola ID
-		const existingFile = await this.findExistingNoteByGranolaId(docId);
+		const existingFile = await this.findExistingNoteByGranolaId(docId, { fileIndex: this.currentSyncFileIndex });
 
 		if (existingFile) {
 			const existingNoteBehavior = this.getExistingNoteBehavior();
@@ -2157,7 +2308,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 				console.log('Note "' + title + '" has been updated in Granola, re-syncing...');
 			}
+		}
 
+		if (this.settings.includeMyNotes) {
+			doc = await this.ensureGranolaMyNotesForDocument(doc, authContext);
+		}
+
+		if (this.shouldFetchTranscript()) {
+			if (this.activeSyncDiagnostics) {
+				this.activeSyncDiagnostics.transcriptFetches++;
+			}
+			const transcriptData = await this.fetchTranscript(authContext, doc.id);
+			transcript = this.transcriptToMarkdown(transcriptData);
+			doc.transcript = transcript;
+		}
+
+		const myNotesMarkdown = this.getMyNotesMarkdown(doc);
+		const hasTranscript = this.shouldFetchTranscript() && transcript && transcript !== 'no_transcript';
+		const hasMyNotes = myNotesMarkdown && this.settings.includeMyNotes;
+
+		if (!hasMyNotes && !hasEnhancedNotes && !hasTranscript) {
+			console.log('Skipping document "' + title + '" - no content available (no enhanced notes, my notes, or transcript)');
+			return false;
+		}
+
+		if (existingFile) {
 			// Update existing note (full update)
 			try {
 				// Extract attendee information
@@ -2190,6 +2365,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						await this.app.vault.process(existingFile, () => linkedMarkdown);
 					}
 				}
+				this.registerGranolaFileIndexEntry(existingFile, docId, false);
 				return true;
 			} catch (updateError) {
 				console.error('Error updating existing note:', updateError);
@@ -2253,6 +2429,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 								await this.app.vault.modify(existingFileByName, linkedMarkdown);
 							}
 						}
+						this.registerGranolaFileIndexEntry(existingFileByName, docId, false);
 						return true;
 					}
 				}
@@ -2280,6 +2457,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		await this.app.vault.create(finalFilepath, finalMarkdown);
+		const createdSummaryFile = this.app.vault.getAbstractFileByPath(finalFilepath);
+		if (createdSummaryFile) {
+			this.registerGranolaFileIndexEntry(createdSummaryFile, docId, false);
+		}
 
 		if (this.settings.storeTranscriptInSeparateNote && hasTranscript) {
 			const transcriptFilePath = await this.writeSeparateTranscriptNote(doc, transcript);
