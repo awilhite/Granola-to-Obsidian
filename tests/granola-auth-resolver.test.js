@@ -114,3 +114,32 @@ test('prefers stored-accounts over older fallback sources when both are present'
 	assert.equal(resolved.sourceKind, 'stored-accounts');
 	assert.equal(resolved.accessToken, 'stored-access-token');
 });
+
+test('refreshes the selected WorkOS session when a refresh function is provided', async () => {
+	const refreshedSession = loadFixture('refreshed-session.json');
+	let refreshCalls = 0;
+
+	const resolver = new GranolaAuthResolver({
+		fs: {
+			existsSync: () => true,
+			readFileSync: () => JSON.stringify(loadFixture('stored-accounts.json')),
+		},
+		os: {
+			homedir: () => '/Users/tester',
+			release: () => '25.2.0',
+			userInfo: () => ({ username: 'tester' }),
+		},
+		platform: 'darwin',
+		clientVersion: '7.255.6',
+		refreshSession: async (candidate) => {
+			refreshCalls += 1;
+			assert.equal(candidate.refreshToken, 'refresh-token-123');
+			return refreshedSession;
+		},
+	});
+
+	const resolved = await resolver.resolveSession({ forceRefresh: true });
+	assert.equal(refreshCalls, 1);
+	assert.equal(resolved.accessToken, 'refreshed-access-token');
+	assert.equal(resolved.sessionId, 'refreshed-session-id');
+});

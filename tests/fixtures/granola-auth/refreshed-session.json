@@ -1,0 +1,9 @@
+{
+  "access_token": "refreshed-access-token",
+  "refresh_token": "refresh-token-456",
+  "expires_in": 3600,
+  "obtained_at": 1779450000000,
+  "session_id": "refreshed-session-id",
+  "sign_in_method": "GoogleOAuth",
+  "token_type": "Bearer"
+}
