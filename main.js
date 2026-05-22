@@ -2,6 +2,8 @@ const obsidian = require('obsidian');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { GranolaAuthResolver } = require('./lib/granola-auth-resolver');
+const { GranolaApiClient } = require('./lib/granola-api-client');
 
 function getDefaultAuthPath() {
 	if (obsidian.Platform.isWin) {
@@ -365,6 +367,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			// Could not load settings, using defaults
 		}
 
+		this.authResolver = new GranolaAuthResolver({
+			clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
+			authKeyPath: this.settings.authKeyPath,
+		});
+
+		this.apiClient = new GranolaApiClient({
+			requestUrl: obsidian.requestUrl,
+		});
+
 		this.statusBarItem = this.addStatusBarItem();
 		this.updateStatusBar('Idle');
 
@@ -437,6 +448,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async saveSettings() {
 		try {
+			if (this.authResolver) {
+				this.authResolver.authKeyPath = this.settings.authKeyPath;
+			}
 			await this.saveData(this.settings);
 			this.setupAutoSync();
 		} catch (error) {
@@ -446,6 +460,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	async saveSettingsWithoutSync() {
 		try {
+			if (this.authResolver) {
+				this.authResolver.authKeyPath = this.settings.authKeyPath;
+			}
 			await this.saveData(this.settings);
 		} catch (error) {
 			console.error('Failed to save settings:', error);
@@ -972,95 +989,26 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	async loadCredentials() {
-		const homedir = os.homedir();
-		const storedAccountsPath = path.resolve(homedir, 'Library/Application Support/Granola/stored-accounts.json');
-		const authPaths = [
-			// New location (with Users in path)
-			path.resolve(homedir, 'Users', os.userInfo().username, 'Library/Application Support/Granola/supabase.json'),
-			// Current configured path
-			path.resolve(homedir, this.settings.authKeyPath),
-			// Fallback to old default location
-			path.resolve(homedir, 'Library/Application Support/Granola/supabase.json')
-		];
-
-		try {
-			if (fs.existsSync(storedAccountsPath)) {
-				const storedAccountsFile = fs.readFileSync(storedAccountsPath, 'utf8');
-				const storedAccounts = JSON.parse(storedAccountsFile);
-				const accounts = safeJsonParse(storedAccounts.accounts, []);
-				const primaryAccount = Array.isArray(accounts) && accounts.length > 0 ? accounts[0] : null;
-				const tokenData = primaryAccount ? safeJsonParse(primaryAccount.tokens, {}) : null;
-				if (tokenData && tokenData.access_token) {
-					console.log('Successfully loaded Granola credentials from:', storedAccountsPath);
-					return {
-						token: tokenData.access_token,
-						sessionId: tokenData.session_id || null,
-						clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
-						platform: this.getGranolaPlatform(),
-						osVersion: os.release(),
-						source: storedAccountsPath,
-					};
-				}
-			}
-		} catch (error) {
-			console.error('Error reading credentials from', storedAccountsPath, ':', error);
+		const session = await this.authResolver.resolveSession();
+		if (!session) {
+			console.error('No valid Granola auth session found');
+			return null;
 		}
 
-		for (const authPath of authPaths) {
-			try {
-				if (!fs.existsSync(authPath)) {
-					continue;
-				}
-
-				const credentialsFile = fs.readFileSync(authPath, 'utf8');
-				const data = JSON.parse(credentialsFile);
-				
-				let accessToken = null;
-				let sessionId = data.session_id || null;
-				
-				// Try new token structure (workos_tokens)
-				if (data.workos_tokens) {
-					try {
-						const workosTokens = JSON.parse(data.workos_tokens);
-						accessToken = workosTokens.access_token;
-						sessionId = sessionId || workosTokens.session_id || null;
-					} catch (e) {
-						// workos_tokens might already be an object
-						accessToken = data.workos_tokens.access_token;
-						sessionId = sessionId || data.workos_tokens.session_id || null;
-					}
-				}
-				
-				// Fallback to old token structure (cognito_tokens)
-				if (!accessToken && data.cognito_tokens) {
-					try {
-						const cognitoTokens = JSON.parse(data.cognito_tokens);
-						accessToken = cognitoTokens.access_token;
-					} catch (e) {
-						// cognito_tokens might already be an object
-						accessToken = data.cognito_tokens.access_token;
-					}
-				}
-				
-				if (accessToken) {
-					console.log('Successfully loaded credentials from:', authPath);
-					return {
-						token: accessToken,
-						sessionId: sessionId || null,
-						clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
-						platform: this.getGranolaPlatform(),
-						osVersion: os.release(),
-						source: authPath,
-					};
-				}
-			} catch (error) {
-				console.error('Error reading credentials from', authPath, ':', error);
-				continue;
-			}
-		}
-
-		console.error('No valid credentials found in any of the expected locations');
-		return null;
+		return {
+			token: session.accessToken,
+			refreshToken: session.refreshToken,
+			sessionId: session.sessionId,
+			signInMethod: session.signInMethod,
+			obtainedAt: session.obtainedAt,
+			expiresInSeconds: session.expiresInSeconds,
+			clientVersion: session.clientVersion,
+			platform: session.platform,
+			osVersion: session.osVersion,
+			source: session.source,
+			workspaceId: session.workspaceId,
+			deviceId: session.deviceId,
+		};
 	}
 
 	async fetchGranolaDocuments(authContext) {
@@ -1069,60 +1017,38 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			const allDocs = [];
 			let offset = 0;
 			const batchSize = 100;
-			let hasMore = true;
-
-			// Determine the maximum number of documents to fetch
 			const maxDocuments = this.settings.syncAllHistoricalNotes
 				? Number.MAX_SAFE_INTEGER
 				: this.settings.documentSyncLimit;
 
-			while (hasMore && allDocs.length < maxDocuments) {
-				const response = await obsidian.requestUrl({
-					url: 'https://api.granola.ai/v2/get-documents',
-					method: 'POST',
-					headers: this.getPublicGranolaHeaders(token),
-					body: JSON.stringify({
-						limit: batchSize,
-						offset: offset,
-						include_last_viewed_panel: true,
-						include_panels: true
-					})
+			while (allDocs.length < maxDocuments) {
+				const docs = await this.apiClient.fetchDocuments({
+					accessToken: token,
+					clientVersion: authContext.clientVersion,
+					platform: authContext.platform,
+					osVersion: authContext.osVersion,
+					workspaceId: authContext.workspaceId,
+					deviceId: authContext.deviceId,
+				}, {
+					limit: batchSize,
+					offset,
 				});
 
-				const apiResponse = response.json;
-
-				if (!apiResponse || !apiResponse.docs) {
-					console.error('API response format is unexpected');
-					return allDocs.length > 0 ? allDocs : null;
+				if (!Array.isArray(docs) || docs.length === 0) {
+					break;
 				}
 
-				const docs = apiResponse.docs;
 				allDocs.push(...docs);
-
-				// Check if there are more documents to fetch
-				if (docs.length < batchSize) {
-					// Received fewer docs than requested, so we've reached the end
-					hasMore = false;
-				} else if (!this.settings.syncAllHistoricalNotes && allDocs.length >= maxDocuments) {
-					// Reached the user-specified limit
-					hasMore = false;
-				} else {
-					// More documents may be available, increment offset
-					offset += batchSize;
+				if (docs.length < batchSize || (!this.settings.syncAllHistoricalNotes && allDocs.length >= maxDocuments)) {
+					break;
 				}
 
-				// Show progress for large syncs
-				if (this.settings.syncAllHistoricalNotes && allDocs.length > 100) {
-					this.updateStatusBar('Syncing', `${allDocs.length} docs fetched`);
-				}
+				offset += batchSize;
 			}
 
-			// Trim to max documents if we went over
 			if (allDocs.length > maxDocuments) {
 				allDocs.length = maxDocuments;
 			}
-
-			console.log(`Fetched ${allDocs.length} documents from Granola`);
 			return allDocs;
 		} catch (error) {
 			console.error('Error fetching documents:', error);
