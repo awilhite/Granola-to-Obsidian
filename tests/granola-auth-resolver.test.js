@@ -34,9 +34,10 @@ test('parses WorkOS stored-accounts payloads into normalized sessions', async ()
 });
 
 test('parses WorkOS supabase payloads into normalized sessions', async () => {
+	const supabasePath = '/Users/tester/Library/Application Support/Granola/supabase.json';
 	const resolver = new GranolaAuthResolver({
 		fs: {
-			existsSync: (file) => file.endsWith('supabase.json'),
+			existsSync: (file) => file === supabasePath,
 			readFileSync: () => JSON.stringify(loadFixture('supabase.json')),
 		},
 		os: {
@@ -74,6 +75,11 @@ test('prefers stored-accounts over older fallback sources when both are present'
 		platform: 'darwin',
 		clientVersion: '7.255.6',
 	});
+
+	const candidates = resolver.loadCandidateSessions();
+	assert.equal(candidates.length, 2);
+	assert.equal(candidates[0].sourceKind, 'stored-accounts');
+	assert.equal(candidates[1].sourceKind, 'supabase');
 
 	const resolved = await resolver.resolveSession();
 	assert.equal(resolved.sourceKind, 'stored-accounts');
