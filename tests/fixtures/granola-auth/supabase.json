@@ -1,0 +1,4 @@
+{
+  "workos_tokens": "{\"access_token\":\"supabase-access-token\",\"refresh_token\":\"supabase-refresh-token\",\"expires_in\":3600,\"obtained_at\":1779300000000,\"session_id\":\"supabase-session\",\"sign_in_method\":\"GoogleOAuth\",\"token_type\":\"Bearer\"}",
+  "session_id": "supabase-session"
+}
