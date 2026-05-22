@@ -11,9 +11,10 @@ function loadFixture(name) {
 }
 
 test('parses WorkOS stored-accounts payloads into normalized sessions', async () => {
+	const storedAccountsPath = '/Users/tester/Library/Application Support/Granola/stored-accounts.json';
 	const resolver = new GranolaAuthResolver({
 		fs: {
-			existsSync: () => true,
+			existsSync: (file) => file === storedAccountsPath,
 			readFileSync: () => JSON.stringify(loadFixture('stored-accounts.json')),
 		},
 		os: {
@@ -31,6 +32,34 @@ test('parses WorkOS stored-accounts payloads into normalized sessions', async ()
 	assert.equal(candidates[0].refreshToken, 'refresh-token-123');
 	assert.equal(candidates[0].sessionId, 'session-123');
 	assert.equal(candidates[0].signInMethod, 'GoogleOAuth');
+});
+
+test('continues to fallback auth sources when stored-accounts.json is malformed', async () => {
+	const storedAccountsPath = '/Users/tester/Library/Application Support/Granola/stored-accounts.json';
+	const supabasePath = '/Users/tester/Library/Application Support/Granola/supabase.json';
+	const files = {
+		[storedAccountsPath]: '{"accounts":"not valid json"',
+		[supabasePath]: JSON.stringify(loadFixture('supabase.json')),
+	};
+
+	const resolver = new GranolaAuthResolver({
+		fs: {
+			existsSync: (file) => Object.hasOwn(files, file),
+			readFileSync: (file) => files[file],
+		},
+		os: {
+			homedir: () => '/Users/tester',
+			release: () => '25.2.0',
+			userInfo: () => ({ username: 'tester' }),
+		},
+		platform: 'darwin',
+		clientVersion: '7.255.6',
+	});
+
+	const candidates = resolver.loadCandidateSessions();
+	assert.equal(candidates.length, 1);
+	assert.equal(candidates[0].sourceKind, 'supabase');
+	assert.equal(candidates[0].accessToken, 'supabase-access-token');
 });
 
 test('parses WorkOS supabase payloads into normalized sessions', async () => {
