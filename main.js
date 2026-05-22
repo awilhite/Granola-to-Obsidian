@@ -367,13 +367,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			// Could not load settings, using defaults
 		}
 
+		this.apiClient = new GranolaApiClient({
+			requestUrl: obsidian.requestUrl,
+		});
+
 		this.authResolver = new GranolaAuthResolver({
 			clientVersion: GRANOLA_TEMPLATE_CLIENT_VERSION,
 			authKeyPath: this.settings.authKeyPath,
-		});
-
-		this.apiClient = new GranolaApiClient({
-			requestUrl: obsidian.requestUrl,
+			refreshSession: async (candidate) => await this.apiClient.refreshWorkOsSession(candidate),
 		});
 
 		this.statusBarItem = this.addStatusBarItem();
@@ -989,7 +990,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 	}
 
 	async loadCredentials() {
-		const session = await this.authResolver.resolveSession();
+		const session = await this.authResolver.resolveSession({ forceRefresh: true });
 		if (!session) {
 			console.error('No valid Granola auth session found');
 			return null;

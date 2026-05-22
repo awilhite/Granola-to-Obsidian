@@ -33,6 +33,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
 - **📄 Separate Transcript Notes**: Store transcripts in their own notes instead of embedding them inline
 - **🧪 Granola Template Management**: Automatically ensure a selected Granola template exists before sync using private Granola APIs
+- **🔐 WorkOS Session Compatibility**: Refreshes newer Granola WorkOS sessions before sync so document fetch keeps working with current desktop auth behavior
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
 - **📝 Existing Note Modes**: Choose whether existing notes are never updated, updated only when Granola changed, or always rewritten
@@ -72,6 +73,17 @@ Path to your fallback Granola authentication file. Default locations:
 - **Windows**: `AppData/Roaming/Granola/supabase.json`
 
 The plugin automatically detects your operating system and sets the appropriate default path. For newer Granola installs, the plugin will also automatically check `stored-accounts.json` first when available.
+
+### Granola Authentication Compatibility
+
+Newer Granola desktop builds use a WorkOS-style session model instead of relying on one long-lived token file.
+
+Current plugin behavior:
+- The plugin checks `stored-accounts.json` first when present, then falls back to the configured `supabase.json` path
+- Before sync, it refreshes the selected WorkOS session through Granola's current `refresh-access-token` flow
+- Sync then uses the refreshed access token for document fetches and the rest of the Granola API calls
+
+This means the plugin is compatible with newer Granola auth behavior without requiring Granola to rewrite fresh bearer tokens to disk before every sync.
 
 ### Filename Template
 Customize how your notes are named using these variables:
@@ -489,10 +501,11 @@ Your converted meeting content appears here in clean Markdown format.
 
 ### Authentication Issues
 - Make sure Granola desktop app is logged in
-- Check that the auth key file exists at the expected location:
+- Check that Granola auth files exist at the expected locations:
+  - **macOS**: `~/Library/Application Support/Granola/stored-accounts.json`
   - **macOS**: `~/Library/Application Support/Granola/supabase.json`
   - **Windows**: `C:\Users\[USERNAME]\AppData\Roaming\Granola\supabase.json`
-- If the file is in a different location, update the "Auth Key Path" in plugin settings
+- If `supabase.json` is in a different location, update the "Auth Key Path" in plugin settings
 - Try logging out and back in to Granola
 
 ### File Naming Issues

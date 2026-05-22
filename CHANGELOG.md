@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
   - `Never update existing notes`
   - `Update when Granola changed`
   - `Always rewrite existing notes`
+- **🔐 Granola auth compatibility**: Sync now resolves newer WorkOS-style Granola sessions, refreshes them through the current `refresh-access-token` flow, and uses the refreshed session for document fetches
 - **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode
 - **📅 Canonical note date**: Synced notes now include a `date` property derived from the meeting date for better Obsidian Bases and table compatibility
 - **📝 My Notes fallback**: When Granola's public feed does not include a `my_notes` panel, the plugin now falls back to private document fields like `notes_markdown` so your authored notes still appear in the `## My Notes` section

@@ -141,5 +141,6 @@ test('refreshes the selected WorkOS session when a refresh function is provided'
 	const resolved = await resolver.resolveSession({ forceRefresh: true });
 	assert.equal(refreshCalls, 1);
 	assert.equal(resolved.accessToken, 'refreshed-access-token');
+	assert.equal(resolved.refreshToken, 'refresh-token-456');
 	assert.equal(resolved.sessionId, 'refreshed-session-id');
 });
