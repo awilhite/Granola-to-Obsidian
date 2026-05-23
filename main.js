@@ -718,6 +718,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			durationMs: 0,
 			docsFetched: 0,
 			docsToSync: 0,
+			docsStarted: 0,
 			docsSkippedNotReady: 0,
 			docsProcessed: 0,
 			syncedCount: 0,
@@ -731,6 +732,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			findByIdLookups: 0,
 			findByIdCacheHits: 0,
 			templateStats: { attempted: 0, applied: 0, failed: 0, skipped: 0 },
+			currentDocIndex: 0,
+			currentDocTitle: '',
+			currentPhase: '',
+			currentTemplateStep: '',
+			currentTemplateElapsedMs: 0,
 			overlapSkipped: false,
 			error: null,
 		};
@@ -755,34 +761,83 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		console.log('Granola Sync diagnostics:', diagnostics);
 	}
 
+	truncateSyncLabel(text, maxLength = 48) {
+		if (!text) {
+			return '';
+		}
+
+		if (text.length <= maxLength) {
+			return text;
+		}
+
+		return text.slice(0, maxLength - 1) + '…';
+	}
+
+	buildActiveSyncStatusMessage(diagnostics) {
+		if (!diagnostics) {
+			return 'Syncing...';
+		}
+
+		const total = diagnostics.docsToSync || diagnostics.docsFetched || 0;
+		const currentIndex = diagnostics.currentDocIndex || 0;
+		const progress = total > 0 ? `${Math.min(currentIndex, total)}/${total}` : 'Syncing';
+		const phase = diagnostics.currentPhase || 'Syncing';
+		const title = diagnostics.currentDocTitle
+			? ` "${this.truncateSyncLabel(diagnostics.currentDocTitle)}"`
+			: '';
+
+		return `${progress} ${phase}${title}`;
+	}
+
+	updateActiveSyncProgress(updates = {}) {
+		const diagnostics = this.activeSyncDiagnostics;
+		if (!diagnostics) {
+			return;
+		}
+
+		Object.assign(diagnostics, updates);
+		this.updateStatusBar('Syncing', this.buildActiveSyncStatusMessage(diagnostics));
+	}
+
 	formatSyncDiagnosticsSummary(diagnostics) {
 		if (!diagnostics) {
 			return 'No sync diagnostics available yet.';
 		}
 
 		const duration = diagnostics.durationMs ? `${(diagnostics.durationMs / 1000).toFixed(1)}s` : 'n/a';
+		const templateStats = diagnostics.templateStats || {};
+		const templateSummary =
+			(templateStats.applied || templateStats.failed || templateStats.skipped)
+				? `templates ${templateStats.applied || 0}/${templateStats.failed || 0}/${templateStats.skipped || 0}`
+				: null;
+		const activePhase = diagnostics.currentPhase
+			? `phase ${diagnostics.currentPhase}${diagnostics.currentDocTitle ? ` (${this.truncateSyncLabel(diagnostics.currentDocTitle, 32)})` : ''}`
+			: null;
 		return [
 			`run ${diagnostics.runId}`,
 			`${diagnostics.source}`,
 			`${duration}`,
-			`docs ${diagnostics.docsFetched}/${diagnostics.docsToSync}`,
+			`docs ${diagnostics.docsProcessed}/${diagnostics.docsToSync || diagnostics.docsFetched || 0}`,
 			`synced ${diagnostics.syncedCount}`,
 			`ready-skips ${diagnostics.docsSkippedNotReady}`,
 			`transcripts ${diagnostics.transcriptFetches}`,
 			`my-notes ${diagnostics.myNotesHydrations}`,
 			`index ${diagnostics.indexGranolaNotes}+${diagnostics.indexTranscriptNotes}`,
+			templateSummary,
+			activePhase,
 			diagnostics.error ? `error ${diagnostics.error}` : null,
 		].filter(Boolean).join(' | ');
 	}
 
 	showLastSyncDiagnostics() {
-		if (!this.lastSyncDiagnostics) {
+		const diagnostics = this.activeSyncDiagnostics || this.lastSyncDiagnostics;
+		if (!diagnostics) {
 			new obsidian.Notice('No Granola sync diagnostics available yet.');
 			return;
 		}
 
-		console.log('Granola Sync last diagnostics:', this.lastSyncDiagnostics);
-		new obsidian.Notice(this.formatSyncDiagnosticsSummary(this.lastSyncDiagnostics), 10000);
+		console.log('Granola Sync diagnostics snapshot:', diagnostics);
+		new obsidian.Notice(this.formatSyncDiagnosticsSummary(diagnostics), 10000);
 	}
 
 	getFrequencyLabel(frequency) {
@@ -1092,6 +1147,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				console.log(`Folder filter: syncing ${documentsToSync.length} of ${documents.length} documents`);
 			}
 			this.activeSyncDiagnostics.docsToSync = documentsToSync.length;
+			this.updateActiveSyncProgress({
+				currentDocIndex: 0,
+				currentDocTitle: '',
+				currentPhase: `Preparing ${documentsToSync.length} documents`,
+			});
 
 			let syncedCount = 0;
 			const todaysNotes = [];
@@ -1100,6 +1160,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			for (let i = 0; i < documentsToSync.length; i++) {
 				const doc = documentsToSync[i];
 				try {
+					this.updateActiveSyncProgress({
+						docsStarted: i + 1,
+						currentDocIndex: i + 1,
+						currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
+						currentPhase: 'Checking document',
+					});
 					const readiness = this.getDocumentSyncReadiness(doc);
 					if (!readiness.ready) {
 						this.activeSyncDiagnostics.docsSkippedNotReady++;
@@ -1135,6 +1201,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					console.error('Error processing document ' + doc.title + ':', error);
 				}
 			}
+
+			this.updateActiveSyncProgress({
+				currentDocTitle: '',
+				currentPhase: 'Finalizing sync',
+			});
 
 			this.activeSyncDiagnostics.syncedCount = syncedCount;
 			this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
@@ -2242,15 +2313,25 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (!this.templateManagementStats) {
 			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
 		}
+		if (this.activeSyncDiagnostics) {
+			this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+		}
 
 		try {
 			const client = this.getGranolaPrivateClient(authContext);
+			this.updateActiveSyncProgress({
+				currentPhase: 'Checking template panels',
+				currentTemplateStep: 'panels',
+			});
 			const existingPanels = await client.getDocumentPanels(doc.id);
 			doc.privatePanels = Array.isArray(existingPanels) ? existingPanels : [];
 
 			const existingTemplatePanel = this.getGranolaTemplatePanel(doc.privatePanels, this.settings.granolaTemplateId);
 			if (existingTemplatePanel) {
 				this.templateManagementStats.skipped++;
+				if (this.activeSyncDiagnostics) {
+					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+				}
 				const existingMarkdown = this.getPanelMarkdownContent(existingTemplatePanel);
 				if (existingMarkdown) {
 					doc.granolaTemplateManagementMarkdown = existingMarkdown;
@@ -2259,7 +2340,14 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			this.templateManagementStats.attempted++;
+			if (this.activeSyncDiagnostics) {
+				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+			}
 
+			this.updateActiveSyncProgress({
+				currentPhase: 'Loading template context',
+				currentTemplateStep: 'context',
+			});
 			const templates = await this.fetchGranolaTemplates(authContext);
 			const selectedTemplate = templates.find((template) => template.id === this.settings.granolaTemplateId);
 			if (!selectedTemplate) {
@@ -2272,10 +2360,25 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				client.getDocumentTranscript(doc.id),
 			]);
 
+			const generationStartedAt = Date.now();
+			this.updateActiveSyncProgress({
+				currentPhase: `Generating "${selectedTemplate.title || 'template'}"`,
+				currentTemplateStep: 'generate',
+				currentTemplateElapsedMs: 0,
+			});
 			const generatedMarkdown = await client.generateTemplateMarkdown(batchDoc || doc, metadata || {}, transcriptEntries || [], selectedTemplate);
 			if (!generatedMarkdown) {
 				throw new Error('Granola template generation returned empty content');
 			}
+			const generationDurationMs = Date.now() - generationStartedAt;
+			console.log(
+				`Granola Template Management generated "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${generationDurationMs}ms`
+			);
+			this.updateActiveSyncProgress({
+				currentPhase: 'Saving generated template',
+				currentTemplateStep: 'save',
+				currentTemplateElapsedMs: generationDurationMs,
+			});
 
 			const createdPanel = await client.createDocumentPanel(doc.id, selectedTemplate.id);
 			if (!createdPanel || !createdPanel.id) {
@@ -2298,10 +2401,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			this.templateManagementStats.applied++;
+			if (this.activeSyncDiagnostics) {
+				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+			}
 			console.log(`Granola Template Management applied "${selectedTemplate.title}" to "${doc.title || doc.id}"`);
 		} catch (error) {
 			this.templateManagementStats.failed++;
+			if (this.activeSyncDiagnostics) {
+				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+			}
 			console.error('Granola Template Management failed for "' + (doc.title || doc.id) + '":', error);
+		} finally {
+			this.updateActiveSyncProgress({
+				currentTemplateStep: '',
+				currentTemplateElapsedMs: 0,
+			});
 		}
 
 		return doc;
@@ -2403,20 +2517,19 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const docId = doc.id || 'unknown_id';
 		let transcript = doc.transcript || 'no_transcript';
 
+		// Check if note already exists by Granola ID
+		const existingFile = await this.findExistingNoteByGranolaId(docId, { fileIndex: this.currentSyncFileIndex });
+		const existingNoteBehavior = this.getExistingNoteBehavior();
+		if (existingFile && existingNoteBehavior === 'never') {
+			return true;
+		}
+
 		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
 
 		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
 		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
 
-		// Check if note already exists by Granola ID
-		const existingFile = await this.findExistingNoteByGranolaId(docId, { fileIndex: this.currentSyncFileIndex });
-
 		if (existingFile) {
-			const existingNoteBehavior = this.getExistingNoteBehavior();
-			if (existingNoteBehavior === 'never') {
-				return true;
-			}
-
 			if (existingNoteBehavior === 'changed') {
 				const outdated = await this.isNoteOutdated(existingFile, doc);
 				if (!outdated) {
@@ -2428,6 +2541,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		if (this.settings.includeMyNotes) {
+			this.updateActiveSyncProgress({
+				currentPhase: 'Loading My Notes',
+			});
 			doc = await this.ensureGranolaMyNotesForDocument(doc, authContext);
 		}
 
@@ -2435,6 +2551,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (this.activeSyncDiagnostics) {
 				this.activeSyncDiagnostics.transcriptFetches++;
 			}
+			this.updateActiveSyncProgress({
+				currentPhase: 'Loading transcript',
+			});
 			const transcriptData = await this.fetchTranscript(authContext, doc.id);
 			transcript = this.transcriptToMarkdown(transcriptData);
 			doc.transcript = transcript;
@@ -2452,6 +2571,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (existingFile) {
 			// Update existing note (full update)
 			try {
+				this.updateActiveSyncProgress({
+					currentPhase: 'Updating note',
+				});
 				// Extract attendee information
 				const attendeeNames = this.extractAttendeeNames(doc);
 				const attendeeTags = this.generateAttendeeTags(attendeeNames);
@@ -2491,6 +2613,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Create new note
+		this.updateActiveSyncProgress({
+			currentPhase: 'Creating note',
+		});
 		// Extract attendee information
 		const attendeeNames = this.extractAttendeeNames(doc);
 		const attendeeTags = this.generateAttendeeTags(attendeeNames);
