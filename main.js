@@ -2212,7 +2212,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		if (panel.content && panel.content.type === 'doc') {
-			return this.convertProseMirrorToMarkdown(panel.content).trim();
+			const markdown = this.convertProseMirrorToMarkdown(panel.content).trim();
+			return this.isMalformedSummaryMarkdown(markdown)
+				? this.normalizeMalformedSummaryMarkdown(markdown)
+				: markdown;
 		}
 
 		return '';
@@ -2226,7 +2229,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		if (typeof doc.granolaTemplateManagementMarkdown === 'string' && doc.granolaTemplateManagementMarkdown.trim()) {
-			return doc.granolaTemplateManagementMarkdown.trim();
+			const managedMarkdown = doc.granolaTemplateManagementMarkdown.trim();
+			return this.isMalformedSummaryMarkdown(managedMarkdown)
+				? this.normalizeMalformedSummaryMarkdown(managedMarkdown)
+				: managedMarkdown;
 		}
 
 		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
@@ -2236,7 +2242,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return this.getPanelMarkdownContent(doc.last_viewed_panel);
 		}
 
-		return this.convertProseMirrorToMarkdown(enhancedNotesContent).trim();
+		const enhancedMarkdown = this.convertProseMirrorToMarkdown(enhancedNotesContent).trim();
+		return this.isMalformedSummaryMarkdown(enhancedMarkdown)
+			? this.normalizeMalformedSummaryMarkdown(enhancedMarkdown)
+			: enhancedMarkdown;
 	}
 
 	getAllDocumentPanels(doc) {

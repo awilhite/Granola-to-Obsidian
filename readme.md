@@ -29,6 +29,7 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **✨ Rich Metadata**: Includes a canonical `date` property plus Granola source timestamps and IDs
 - **🧩 Metadata Mapping**: Map Granola's inline metadata block into frontmatter fields like `org`, `people`, `topics`, and `meeting_type`
 - **🔗 Metadata Templates**: Format mapped org and people values with templates such as `[[Reference/{name}]]`
+- **🩹 Summary Markdown Repair**: Automatically normalize malformed one-line Granola summary markdown before metadata extraction and note writing
 - **✅ Review Task**: Optionally add a review task near the top of each synced meeting note
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
 - **📄 Separate Transcript Notes**: Store transcripts in their own notes instead of embedding them inline
@@ -182,6 +183,7 @@ Map Granola's inline `### Metadata` block into structured frontmatter fields for
 - **Structured properties**: Turn machine-generated metadata into first-class Obsidian properties
 - **Reference-friendly**: Point `org` and `people` directly at linked reference notes
 - **Cleaner note bodies**: Remove the raw metadata JSON block after extraction
+- **More resilient imports**: Repair malformed one-line summary markdown so metadata extraction and section formatting still work
 
 ### My Notes
 

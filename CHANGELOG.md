@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
   - `Never update existing notes`
   - `Update when Granola changed`
   - `Always rewrite existing notes`
+- **🩹 Malformed summary normalization**: Collapsed one-line Granola summaries are now normalized before metadata extraction and note writing, including summaries returned through ProseMirror-backed panels
 - **🔐 Granola auth compatibility**: Sync now resolves newer WorkOS-style Granola sessions, refreshes them through the current `refresh-access-token` flow, and uses the refreshed session for document fetches
 - **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode
 - **📅 Canonical note date**: Synced notes now include a `date` property derived from the meeting date for better Obsidian Bases and table compatibility
