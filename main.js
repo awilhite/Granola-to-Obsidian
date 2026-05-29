@@ -2152,13 +2152,63 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		return matches[0];
 	}
 
+	isMalformedSummaryMarkdown(markdown) {
+		if (typeof markdown !== 'string') {
+			return false;
+		}
+
+		const trimmed = markdown.trim();
+		if (!trimmed) {
+			return false;
+		}
+
+		const hasCollapsedMetadataFence = /###\s*Metadata\s*```json\b/i.test(trimmed);
+		const isSingleLineCollapsedSummary =
+			!trimmed.includes('\n') &&
+			/###\s+\S/.test(trimmed) &&
+			/\s+-\s+\S/.test(trimmed) &&
+			/\s+###\s+\S/.test(trimmed);
+
+		return hasCollapsedMetadataFence || isSingleLineCollapsedSummary;
+	}
+
+	normalizeMalformedSummaryMarkdown(markdown) {
+		const trimmed = typeof markdown === 'string' ? markdown.trim() : '';
+		const hasCollapsedMetadataFence = /###\s*Metadata\s*```json\b/i.test(trimmed);
+		const isSingleLineCollapsedSummary =
+			!trimmed.includes('\n') &&
+			/###\s+\S/.test(trimmed) &&
+			/\s+-\s+\S/.test(trimmed) &&
+			/\s+###\s+\S/.test(trimmed);
+
+		if (!trimmed || (!hasCollapsedMetadataFence && !isSingleLineCollapsedSummary)) {
+			return trimmed;
+		}
+
+		let normalized = trimmed;
+
+		normalized = normalized.replace(
+			/###\s*Metadata\s*```json\s*/i,
+			'### Metadata\n```json\n'
+		);
+		normalized = normalized.replace(/\s*```\s*(?=###\s+)/g, '\n```\n\n');
+		normalized = normalized.replace(/\s*```\s*$/g, '\n```');
+		normalized = normalized.replace(/([^\n])\s+(###\s+)/g, '$1\n\n$2');
+		normalized = normalized.replace(/([^\n])\s+-\s+/g, '$1\n- ');
+
+		return normalized.trim();
+	}
+
 	getPanelMarkdownContent(panel) {
 		if (!panel || panel.deleted_at) {
 			return '';
 		}
 
 		if (typeof panel.content === 'string') {
-			return panel.content.trim();
+			const markdown = panel.content.trim();
+			return this.isMalformedSummaryMarkdown(markdown)
+				? this.normalizeMalformedSummaryMarkdown(markdown)
+				: markdown;
 		}
 
 		if (panel.content && panel.content.type === 'doc') {
