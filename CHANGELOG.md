@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
   - `Never update existing notes`
   - `Update when Granola changed`
   - `Always rewrite existing notes`
+- **🔄 Quieter routine sync checks**: Auto-sync now shows a simple `Syncing` status during lightweight per-note scans and defers template management work for existing notes until a rewrite is actually needed
 - **🩹 Malformed summary normalization**: Collapsed one-line Granola summaries are now normalized before metadata extraction and note writing, including summaries returned through ProseMirror-backed panels
 - **🔐 Granola auth compatibility**: Sync now resolves newer WorkOS-style Granola sessions, refreshes them through the current `refresh-access-token` flow, and uses the refreshed session for document fetches
 - **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode

@@ -1163,8 +1163,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					this.updateActiveSyncProgress({
 						docsStarted: i + 1,
 						currentDocIndex: i + 1,
-						currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
-						currentPhase: 'Checking document',
+						currentDocTitle: '',
+						currentPhase: 'Syncing',
 					});
 					const readiness = this.getDocumentSyncReadiness(doc);
 					if (!readiness.ready) {
@@ -2379,6 +2379,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		try {
 			const client = this.getGranolaPrivateClient(authContext);
 			this.updateActiveSyncProgress({
+				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: 'Checking template panels',
 				currentTemplateStep: 'panels',
 			});
@@ -2404,6 +2405,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 
 			this.updateActiveSyncProgress({
+				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: 'Loading template context',
 				currentTemplateStep: 'context',
 			});
@@ -2421,6 +2423,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 			const generationStartedAt = Date.now();
 			this.updateActiveSyncProgress({
+				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: `Generating "${selectedTemplate.title || 'template'}"`,
 				currentTemplateStep: 'generate',
 				currentTemplateElapsedMs: 0,
@@ -2434,6 +2437,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				`Granola Template Management generated "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${generationDurationMs}ms`
 			);
 			this.updateActiveSyncProgress({
+				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: 'Saving generated template',
 				currentTemplateStep: 'save',
 				currentTemplateElapsedMs: generationDurationMs,
@@ -2472,6 +2476,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			console.error('Granola Template Management failed for "' + (doc.title || doc.id) + '":', error);
 		} finally {
 			this.updateActiveSyncProgress({
+				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentTemplateStep: '',
 				currentTemplateElapsedMs: 0,
 			});
@@ -2575,6 +2580,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const title = doc.title || 'Untitled Granola Note';
 		const docId = doc.id || 'unknown_id';
 		let transcript = doc.transcript || 'no_transcript';
+		const updateDocProgress = (updates = {}) => this.updateActiveSyncProgress({
+			currentDocTitle: title,
+			...updates,
+		});
 
 		// Check if note already exists by Granola ID
 		const existingFile = await this.findExistingNoteByGranolaId(docId, { fileIndex: this.currentSyncFileIndex });
@@ -2582,11 +2591,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (existingFile && existingNoteBehavior === 'never') {
 			return true;
 		}
-
-		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
-
-		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
-		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
 
 		if (existingFile) {
 			if (existingNoteBehavior === 'changed') {
@@ -2599,8 +2603,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			}
 		}
 
+		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
+
+		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
+		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;
+
 		if (this.settings.includeMyNotes) {
-			this.updateActiveSyncProgress({
+			updateDocProgress({
 				currentPhase: 'Loading My Notes',
 			});
 			doc = await this.ensureGranolaMyNotesForDocument(doc, authContext);
@@ -2610,7 +2619,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (this.activeSyncDiagnostics) {
 				this.activeSyncDiagnostics.transcriptFetches++;
 			}
-			this.updateActiveSyncProgress({
+			updateDocProgress({
 				currentPhase: 'Loading transcript',
 			});
 			const transcriptData = await this.fetchTranscript(authContext, doc.id);
@@ -2630,7 +2639,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (existingFile) {
 			// Update existing note (full update)
 			try {
-				this.updateActiveSyncProgress({
+				updateDocProgress({
 					currentPhase: 'Updating note',
 				});
 				// Extract attendee information
@@ -2672,7 +2681,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		// Create new note
-		this.updateActiveSyncProgress({
+		updateDocProgress({
 			currentPhase: 'Creating note',
 		});
 		// Extract attendee information
