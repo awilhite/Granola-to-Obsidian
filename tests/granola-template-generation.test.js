@@ -164,6 +164,18 @@ test('waitForGeneratedPanel returns only a structured persisted matching panel',
 	assert.equal(JSON.parse(client.requests[0].body).include_ydoc_state, true);
 });
 
+test('waitForGeneratedPanel continues polling past malformed persisted content entries', async () => {
+	const client = clientWithPanelResponses([
+		[{ id: 'panel-1', template_slug: 'template-1', content_updated_at: '2026-07-17T20:07:05.566Z', ydoc_state: 'state', content: { type: 'doc', content: [null, {}] } }],
+		[{ id: 'panel-1', template_slug: 'template-1', content_updated_at: '2026-07-17T20:07:06.566Z', ydoc_state: 'state-2', content: { type: 'doc', content: [{ type: 'heading' }] } }],
+	]);
+
+	const panel = await client.waitForGeneratedPanel('doc-1', 'panel-1', 'template-1', { attempts: 2, delayMs: 0 });
+
+	assert.deepEqual(panel.content.content, [{ type: 'heading' }]);
+	assert.equal(client.requests.length, 2);
+});
+
 test('waitForGeneratedPanel rejects deleted, wrong-template, and unstructured panels', async () => {
 	const client = clientWithPanelResponses([[]]);
 	await assert.rejects(

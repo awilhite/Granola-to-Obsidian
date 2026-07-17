@@ -435,7 +435,12 @@ class GranolaPrivateClient {
 					candidate.content &&
 					candidate.content.type === 'doc' &&
 					Array.isArray(candidate.content.content) &&
-					candidate.content.content.length > 0
+					candidate.content.content.some((node) =>
+						node !== null &&
+						typeof node === 'object' &&
+						typeof node.type === 'string' &&
+						node.type.length > 0
+					)
 				)
 				: null;
 
