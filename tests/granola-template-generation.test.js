@@ -25,6 +25,7 @@ function extractMethod(methodName, consoleObject = console) {
 		console: consoleObject,
 		Date,
 		Promise,
+		GRANOLA_GENERATION_STALE_PANEL_AGE_MS: 10 * 60 * 1000,
 	});
 }
 
@@ -155,6 +156,7 @@ function templatePluginFixture({
 		deleteDocumentPanel: async () => {
 			calls.push('deletePanel');
 			if (outcome === 'generation-and-cleanup-failure') throw new Error('cleanup failed');
+			if (outcome === 'stale-cleanup-failure') throw new Error('stale cleanup failed');
 		},
 	};
 	const testConsole = {
@@ -263,17 +265,17 @@ test('ambiguous create leaves multiple new panels untouched', async () => {
 });
 
 test('ambiguous create leaves a newly appearing populated panel untouched', async () => {
+	const populatedPanel = {
+		id: 'panel-concurrent',
+		template_slug: 'template-1',
+		content: { type: 'doc', content: [{ type: 'heading' }] },
+	};
 	const { plugin, calls } = templatePluginFixture({
 		outcome: 'create-throws',
-		panelSnapshots: [[
-			{
-				id: 'panel-concurrent',
-				template_slug: 'template-1',
-				content: { type: 'doc', content: [{ type: 'heading' }] },
-			},
-		]],
+		panelSnapshots: [[], [populatedPanel]],
 	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'getPanels']);
 	assert.equal(calls.includes('deletePanel'), false);
 });
 
@@ -293,11 +295,59 @@ test('ambiguous create does not delete an empty panel beside a concurrent popula
 	assert.equal(calls.includes('deletePanel'), false);
 });
 
-test('an empty matching panel is removed before a retry creates a fresh panel', async () => {
-	const emptyPanel = { id: 'panel-empty', template_slug: 'template-1', content: '' };
+test('a recent empty matching panel is treated as in progress without creating a duplicate', async () => {
+	const emptyPanel = {
+		id: 'panel-recent',
+		template_slug: 'template-1',
+		content: '',
+		updated_at: new Date().toISOString(),
+	};
+	const { plugin, calls, logs } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.skipped, 1);
+	assert.match(logs.join('\n'), /stage=stale-panel status=in-progress/);
+});
+
+test('a timestamp-less empty matching panel is treated as in progress without creating a duplicate', async () => {
+	const emptyPanel = { id: 'panel-unknown', template_slug: 'template-1', content: '' };
 	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.skipped, 1);
+});
+
+test('a stale empty matching panel is removed before a retry and absent from the returned document', async () => {
+	const emptyPanel = {
+		id: 'panel-empty',
+		template_slug: 'template-1',
+		content: '',
+		created_at: new Date(Date.now() - (11 * 60 * 1000)).toISOString(),
+	};
+	const { plugin, calls, persistedPanel } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 	assert.deepEqual(calls, ['getPanels', 'deletePanel', 'getContext', 'createPanel', 'generate', 'waitForPanel', 'refreshDocument']);
+	assert.equal(result.privatePanels.length, 1);
+	assert.equal(result.privatePanels[0].id, persistedPanel.id);
+	assert.equal(result.privatePanels.some((panel) => panel.id === emptyPanel.id), false);
+});
+
+test('stale cleanup failure is separately reported and aborts the generation attempt', async () => {
+	const emptyPanel = {
+		id: 'panel-stale',
+		template_slug: 'template-1',
+		content: '',
+		updated_at: new Date(Date.now() - (11 * 60 * 1000)).toISOString(),
+	};
+	const { plugin, calls, logs } = templatePluginFixture({
+		outcome: 'stale-cleanup-failure',
+		panelSnapshots: [[emptyPanel]],
+	});
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels', 'deletePanel']);
+	assert.equal(plugin.templateManagementStats.failed, 1);
+	assert.match(logs.join('\n'), /stage=cleanup status=failed/);
+	assert.match(logs.join('\n'), /stage=stale-panel status=failed/);
 });
 
 test('template orchestration logs never include meeting or template titles', async () => {

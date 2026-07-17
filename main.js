@@ -72,6 +72,7 @@ const GRANOLA_TEMPLATE_YDOC_STATE = 'AQLW64i1DgAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXB
 const GRANOLA_TEMPLATE_YDOC_VERSION = 1;
 const GRANOLA_GENERATION_POLL_ATTEMPTS = 5;
 const GRANOLA_GENERATION_POLL_DELAY_MS = 1500;
+const GRANOLA_GENERATION_STALE_PANEL_AGE_MS = 10 * 60 * 1000;
 const POST_MEETING_SYNC_DELAY_MS = 2 * 60 * 1000;
 const MAX_SYNC_DIAGNOSTIC_HISTORY = 10;
 
@@ -2469,6 +2470,15 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					)
 				);
 			};
+			const getPanelActivityTime = (panel) => {
+				for (const timestamp of [panel?.content_updated_at, panel?.updated_at, panel?.created_at]) {
+					const time = new Date(timestamp).getTime();
+					if (!Number.isNaN(time)) {
+						return time;
+					}
+				}
+				return null;
+			};
 			const logStage = (stage, details = {}) => {
 				console.log(
 					'Granola Template Management stage=' + stage +
@@ -2489,8 +2499,10 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						panelId,
 						durationMs: Date.now() - cleanupStartedAt,
 					});
+					return true;
 				} catch (cleanupError) {
 					logStageFailure('cleanup');
+					return false;
 				}
 			};
 			this.updateActiveSyncProgress({
@@ -2514,17 +2526,36 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 				return doc;
 			}
-			for (const stalePanel of doc.privatePanels.filter(isActiveMatchingTemplatePanel)) {
-				if (!stalePanel.id) {
-					continue;
-				}
-				const cleanupStartedAt = Date.now();
-				await client.deleteDocumentPanel(stalePanel.id);
-				logStage('cleanup', {
-					stage: 'stale-panel',
-					panelId: stalePanel.id,
-					durationMs: Date.now() - cleanupStartedAt,
+			const stalePanels = doc.privatePanels
+				.filter(isActiveMatchingTemplatePanel)
+				.filter((panel) => !hasPersistedTemplateContent(panel));
+			const now = Date.now();
+			const inProgressPanel = stalePanels.find((panel) => {
+				const activityTime = getPanelActivityTime(panel);
+				return activityTime === null || now - activityTime < GRANOLA_GENERATION_STALE_PANEL_AGE_MS;
+			});
+			if (inProgressPanel) {
+				logStage('stale-panel', {
+					status: 'in-progress',
+					panelId: inProgressPanel.id || 'unavailable',
 				});
+				this.templateManagementStats.skipped++;
+				if (this.activeSyncDiagnostics) {
+					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+				}
+				return doc;
+			}
+			for (const stalePanel of stalePanels) {
+				if (!stalePanel.id) {
+					logStageFailure('stale-panel');
+					throw new Error('Granola template panel cleanup could not be completed');
+				}
+				const cleanupSucceeded = await deletePanelBestEffort(stalePanel.id, 'stale-panel');
+				if (!cleanupSucceeded) {
+					logStageFailure('stale-panel');
+					throw new Error('Granola template panel cleanup could not be completed');
+				}
+				doc.privatePanels = doc.privatePanels.filter((panel) => panel.id !== stalePanel.id);
 			}
 
 			this.templateManagementStats.attempted++;
