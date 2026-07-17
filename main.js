@@ -485,17 +485,6 @@ class GranolaPrivateClient {
 		});
 	}
 
-	async updateDocumentPanel(panelId, content) {
-		const now = new Date().toISOString();
-		return await this.postJson('https://api.granola.ai/v1/update-document-panel', {
-			id: panelId,
-			content,
-			original_content: content,
-			last_viewed_at: now,
-			content_updated_at: now,
-		});
-	}
-
 	async deleteDocumentPanel(panelId) {
 		const now = new Date().toISOString();
 		return await this.postJson('https://api.granola.ai/v1/update-document-panel', {
@@ -528,38 +517,6 @@ class GranolaPrivateClient {
 		}
 
 		return output.trim();
-	}
-
-	stripNotesWrapper(text) {
-		return String(text || '')
-			.replace(/^\s*<notes>\s*/i, '')
-			.replace(/\s*<\/notes>\s*$/i, '')
-			.trim();
-	}
-
-	collectStreamContent(streamText) {
-		let content = '';
-		for (const chunk of String(streamText || '').split('-----CHUNK_BOUNDARY-----')) {
-			const trimmed = chunk.trim();
-			if (!trimmed) {
-				continue;
-			}
-
-			let parsed = null;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch (error) {
-				continue;
-			}
-
-			const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta
-				? parsed.choices[0].delta.content
-				: null;
-			if (typeof delta === 'string') {
-				content += delta;
-			}
-		}
-		return content;
 	}
 
 	buildPromptVariables(doc, metadata, transcriptEntries, template) {
@@ -645,20 +602,6 @@ class GranolaPrivateClient {
 		};
 	}
 
-	async generateTemplateMarkdown(doc, metadata, transcriptEntries, template) {
-		const streamText = await this.postText(
-			'https://stream.api.granola.ai/v1/llm-proxy-stream',
-			{
-				prompt_slug: 'template-summary-consolidated',
-				prompt_variables: this.buildPromptVariables(doc, metadata, transcriptEntries, template),
-				chat_history: [],
-			},
-			{ accept: '*/*' }
-		);
-
-		const rawContent = this.collectStreamContent(streamText);
-		return this.stripNotesWrapper(rawContent);
-	}
 }
 
 class GranolaSyncPlugin extends obsidian.Plugin {
@@ -2358,13 +2301,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return templateMarkdown;
 		}
 
-		if (typeof doc.granolaTemplateManagementMarkdown === 'string' && doc.granolaTemplateManagementMarkdown.trim()) {
-			const managedMarkdown = doc.granolaTemplateManagementMarkdown.trim();
-			return this.isMalformedSummaryMarkdown(managedMarkdown)
-				? this.normalizeMalformedSummaryMarkdown(managedMarkdown)
-				: managedMarkdown;
-		}
-
 		const enhancedNotesContent = this.extractPanelContent(doc, 'enhanced_notes');
 		if (!enhancedNotesContent) {
 			// Some docs return the visible summary panel as raw markdown in
@@ -2522,10 +2458,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				if (this.activeSyncDiagnostics) {
 					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 				}
-				const existingMarkdown = this.getPanelMarkdownContent(existingTemplatePanel);
-				if (existingMarkdown) {
-					doc.granolaTemplateManagementMarkdown = existingMarkdown;
-				}
 				return doc;
 			}
 
@@ -2551,46 +2483,73 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				client.getDocumentTranscript(doc.id),
 			]);
 
-			const generationStartedAt = Date.now();
 			this.updateActiveSyncProgress({
 				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
-				currentPhase: `Generating "${selectedTemplate.title || 'template'}"`,
-				currentTemplateStep: 'generate',
+				currentPhase: 'Creating template panel',
+				currentTemplateStep: 'create',
 				currentTemplateElapsedMs: 0,
 			});
-			const generatedMarkdown = await client.generateTemplateMarkdown(batchDoc || doc, metadata || {}, transcriptEntries || [], selectedTemplate);
-			if (!generatedMarkdown) {
-				throw new Error('Granola template generation returned empty content');
-			}
-			const generationDurationMs = Date.now() - generationStartedAt;
-			console.log(
-				`Granola Template Management generated "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${generationDurationMs}ms`
-			);
-			this.updateActiveSyncProgress({
-				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
-				currentPhase: 'Saving generated template',
-				currentTemplateStep: 'save',
-				currentTemplateElapsedMs: generationDurationMs,
-			});
 
-			const createdPanel = await client.createDocumentPanel(doc.id, selectedTemplate.id);
-			if (!createdPanel || !createdPanel.id) {
-				throw new Error('Granola template panel could not be created');
-			}
+			let createdPanel = null;
+			try {
+				const creationStartedAt = Date.now();
+				createdPanel = await client.createDocumentPanel(
+					doc.id,
+					selectedTemplate.id,
+					selectedTemplate.title || 'Summary'
+				);
+				if (!createdPanel || !createdPanel.id) {
+					throw new Error('Granola template panel could not be created');
+				}
+				console.log(
+					`Granola Template Management created "${selectedTemplate.title}" panel for "${doc.title || doc.id}" in ${Date.now() - creationStartedAt}ms`
+				);
 
-			await client.updateDocumentPanel(createdPanel.id, generatedMarkdown);
+				const generationStartedAt = Date.now();
+				this.updateActiveSyncProgress({
+					currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
+					currentPhase: 'Generating',
+					currentTemplateStep: 'generate',
+					currentTemplateElapsedMs: 0,
+				});
+				await client.generateDocumentPanel(
+					batchDoc || doc,
+					metadata || {},
+					transcriptEntries || [],
+					selectedTemplate,
+					createdPanel.id,
+					{ auto: this.activeSyncDiagnostics?.source === 'auto' }
+				);
+				const generationDurationMs = Date.now() - generationStartedAt;
+				console.log(
+					`Granola Template Management generated "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${generationDurationMs}ms`
+				);
 
-			const [refreshedPanels, refreshedDoc] = await Promise.all([
-				client.getDocumentPanels(doc.id),
-				client.getDocumentBatch(doc.id),
-			]);
-
-			doc.privatePanels = Array.isArray(refreshedPanels) ? refreshedPanels : doc.privatePanels;
-			doc.granolaTemplateManagementMarkdown = generatedMarkdown;
-			if (refreshedDoc && refreshedDoc.updated_at) {
-				doc.updated_at = refreshedDoc.updated_at;
-			} else {
-				doc.updated_at = new Date().toISOString();
+				this.updateActiveSyncProgress({
+					currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
+					currentPhase: 'Verifying generated template',
+					currentTemplateStep: 'verify',
+					currentTemplateElapsedMs: generationDurationMs,
+				});
+				const verificationStartedAt = Date.now();
+				const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanel.id, selectedTemplate.id);
+				const refreshedDoc = await client.getDocumentBatch(doc.id);
+				doc.privatePanels = [persistedPanel, ...doc.privatePanels.filter((panel) => panel.id !== persistedPanel.id)];
+				if (refreshedDoc?.updated_at) {
+					doc.updated_at = refreshedDoc.updated_at;
+				}
+				console.log(
+					`Granola Template Management verified "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${Date.now() - verificationStartedAt}ms`
+				);
+			} catch (error) {
+				if (createdPanel?.id) {
+					try {
+						await client.deleteDocumentPanel(createdPanel.id);
+					} catch (cleanupError) {
+						console.error('Granola Template Management cleanup failed for "' + (doc.title || doc.id) + '":', cleanupError);
+					}
+				}
+				throw error;
 			}
 
 			this.templateManagementStats.applied++;

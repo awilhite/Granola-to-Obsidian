@@ -19,6 +19,15 @@ function extractBlock(source, marker) {
 	throw new Error(`Unclosed ${marker}`);
 }
 
+function extractMethod(methodName, consoleObject = console) {
+	const marker = `async ${methodName}(`;
+	return vm.runInNewContext(`({ ${extractBlock(mainJs, marker)} })`, {
+		console: consoleObject,
+		Date,
+		Promise,
+	});
+}
+
 function loadPrivateClient(responses) {
 	const requests = [];
 	const responseQueue = [...responses];
@@ -94,6 +103,102 @@ function nativeStreamFixture() {
 		JSON.stringify({ ydoc_state: 'state', ydoc_version: 1 }),
 	].join('-----CHUNK_BOUNDARY-----');
 }
+
+function templatePluginFixture({ outcome, existingPanel = null, source = 'manual' }) {
+	const calls = [];
+	const errors = [];
+	let generateOptions = null;
+	const sourceDoc = { id: 'doc-1', title: 'Testing', updated_at: 'before' };
+	const persistedPanel = {
+		id: 'panel-1',
+		template_slug: 'template-1',
+		content_updated_at: '2026-07-17T20:07:05.566Z',
+		ydoc_state: 'state',
+		content: { type: 'doc', content: [{ type: 'heading' }] },
+	};
+	const client = {
+		getDocumentPanels: async () => { calls.push('getPanels'); return existingPanel ? [existingPanel] : []; },
+		getDocumentBatch: async () => {
+			if (!calls.includes('createPanel')) { calls.push('getContext'); return sourceDoc; }
+			calls.push('refreshDocument');
+			return { ...sourceDoc, updated_at: 'after' };
+		},
+		getDocumentMetadata: async () => ({}),
+		getDocumentTranscript: async () => [],
+		createDocumentPanel: async () => { calls.push('createPanel'); return { id: 'panel-1' }; },
+		generateDocumentPanel: async (...args) => {
+			calls.push('generate');
+			generateOptions = args[5];
+			if (outcome !== 'success') throw new Error('generation failed');
+		},
+		waitForGeneratedPanel: async () => { calls.push('waitForPanel'); return persistedPanel; },
+		deleteDocumentPanel: async () => {
+			calls.push('deletePanel');
+			if (outcome === 'generation-and-cleanup-failure') throw new Error('cleanup failed');
+		},
+	};
+	const testConsole = {
+		...console,
+		log: () => {},
+		error: (...args) => errors.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
+	};
+	const method = extractMethod('ensureGranolaTemplateForDocument', testConsole);
+	const plugin = {
+		...method,
+		settings: { granolaTemplateId: 'template-1' },
+		templateManagementStats: { attempted: 0, applied: 0, failed: 0, skipped: 0 },
+		activeSyncDiagnostics: { source, templateStats: {} },
+		shouldUseGranolaTemplateManagement: () => true,
+		getGranolaPrivateClient: () => client,
+		getGranolaTemplatePanel: (panels, templateId) => panels.find((panel) => panel.template_slug === templateId) || null,
+		getPanelMarkdownContent: () => '',
+		fetchGranolaTemplates: async () => [{ id: 'template-1', title: 'Default', sections: [] }],
+		updateActiveSyncProgress: () => {},
+	};
+	return { plugin, calls, errors, sourceDoc, persistedPanel, getGenerateOptions: () => generateOptions };
+}
+
+test('template orchestration uses persisted structured panel content', async () => {
+	const { plugin, calls, persistedPanel, getGenerateOptions } = templatePluginFixture({ outcome: 'success', source: 'auto' });
+	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'generate', 'waitForPanel', 'refreshDocument']);
+	assert.equal(result.privatePanels[0], persistedPanel);
+	assert.equal(result.granolaTemplateManagementMarkdown, undefined);
+	assert.equal(getGenerateOptions().auto, true);
+	assert.equal(plugin.templateManagementStats.applied, 1);
+});
+
+test('generation failure deletes the new panel and returns the source document', async () => {
+	const { plugin, calls, sourceDoc } = templatePluginFixture({ outcome: 'generation-failure' });
+	const result = await plugin.ensureGranolaTemplateForDocument(sourceDoc, authContext());
+
+	assert.ok(calls.includes('deletePanel'));
+	assert.equal(result, sourceDoc);
+	assert.equal(plugin.templateManagementStats.failed, 1);
+});
+
+test('cleanup failure does not replace the original generation error', async () => {
+	const { plugin, errors } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+
+	assert.match(errors.join('\n'), /generation failed/);
+	assert.match(errors.join('\n'), /cleanup failed/);
+});
+
+test('existing template panel skips native generation', async () => {
+	const existingPanel = {
+		id: 'panel-existing',
+		template_slug: 'template-1',
+		content: { type: 'doc', content: [{ type: 'heading' }] },
+	};
+	const { plugin, calls } = templatePluginFixture({ outcome: 'success', existingPanel });
+	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+
+	assert.equal(result.privatePanels[0], existingPanel);
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.skipped, 1);
+});
 
 test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 	const { Client, requests } = loadPrivateClient([
