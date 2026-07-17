@@ -240,7 +240,7 @@ Automatically ensure a selected Granola template exists in Granola before the pl
 #### Behavior:
 - The plugin checks whether the selected template already exists on each Granola note
 - If the selected template is missing, the plugin creates a panel and asks Granola's native Yjs-backed `generate-summary` flow to populate it
-- Every Template Management generation request sends Granola `auto: false`, including a scheduled sync; the five-minute plugin scheduler remains automatic, while this private flag controls Granola background-generation eligibility
+- Every Template Management generation request sends Granola `auto: false`, including a scheduled sync; the configured plugin scheduler remains automatic, while this private flag controls Granola background-generation eligibility
 - Before importing, the plugin verifies that the generated panel has persisted structured content, including persisted document nodes
 - If the selected template already exists, the plugin leaves it alone
 - If generation, verification, or refresh fails after a panel is created, the plugin attempts a best-effort soft deletion of the newly created panel so a later sync can retry cleanly; cleanup is not guaranteed and the plugin does not perform a final emptiness check before attempting it

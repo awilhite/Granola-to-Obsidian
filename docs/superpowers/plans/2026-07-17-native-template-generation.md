@@ -17,7 +17,7 @@
 - Delete a newly created empty panel after generation or verification failure so a later sync can retry.
 - Persisted panel state, not stream events, is the source of truth.
 - Do not log credentials, transcript text, generated prose, or full private API payloads.
-- Always send `auto: false` for Template Management generation, regardless of manual or scheduled plugin sync source; the five-minute scheduler remains automatic.
+- Always send `auto: false` for Template Management generation, regardless of manual or scheduled plugin sync source; the configured scheduler remains automatic.
 - For generic orchestration failures, log only a numeric HTTP status or `unknown`.
 - Do not add a runtime dependency or a new user-facing setting.
 
@@ -327,8 +327,8 @@ function extractMethod(methodName, consoleObject = console) {
 
 function templatePluginFixture({ outcome }) {
 	const calls = [];
-	const errors = [];
-	const sourceDoc = { id: 'doc-1', title: 'Testing', updated_at: 'before' };
+	const logs = [];
+	const sourceDoc = { id: 'doc-1', updated_at: 'before' };
 	const persistedPanel = {
 		id: 'panel-1',
 		template_slug: 'template-1',
@@ -348,17 +348,17 @@ function templatePluginFixture({ outcome }) {
 		createDocumentPanel: async () => { calls.push('createPanel'); return { id: 'panel-1' }; },
 		generateDocumentPanel: async () => {
 			calls.push('generate');
-			if (outcome !== 'success') throw new Error('generation failed');
+			if (outcome !== 'success') throw new Error();
 		},
 		waitForGeneratedPanel: async () => { calls.push('waitForPanel'); return persistedPanel; },
 		deleteDocumentPanel: async () => {
 			calls.push('deletePanel');
-			if (outcome === 'generation-and-cleanup-failure') throw new Error('cleanup failed');
+			if (outcome === 'generation-and-cleanup-failure') throw new Error();
 		},
 	};
 	const testConsole = {
 		...console,
-		error: (...args) => errors.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
+		error: (...args) => logs.push(args.map(String).join(' ')),
 	};
 	const method = extractMethod('ensureGranolaTemplateForDocument', testConsole);
 	const plugin = {
@@ -373,12 +373,12 @@ function templatePluginFixture({ outcome }) {
 		fetchGranolaTemplates: async () => [{ id: 'template-1', title: 'Default', sections: [] }],
 		updateActiveSyncProgress: () => {},
 	};
-	return { plugin, calls, errors, sourceDoc, persistedPanel };
+	return { plugin, calls, logs, sourceDoc, persistedPanel };
 }
 
 test('template orchestration uses persisted structured panel content', async () => {
 	const { plugin, calls, persistedPanel } = templatePluginFixture({ outcome: 'success' });
-	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1' }, authContext());
 	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'generate', 'waitForPanel', 'refreshDocument']);
 	assert.equal(result.privatePanels[0], persistedPanel);
 	assert.equal(result.granolaTemplateManagementMarkdown, undefined);
@@ -393,11 +393,13 @@ test('generation failure deletes the new panel and returns the source document',
 	assert.equal(plugin.templateManagementStats.failed, 1);
 });
 
-test('cleanup failure does not replace the original generation error', async () => {
-	const { plugin, errors } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
-	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.match(errors.join('\n'), /generation failed/);
-	assert.match(errors.join('\n'), /cleanup failed/);
+test('cleanup failure logs only an allowlisted stage and orchestration status', async () => {
+	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1' }, authContext());
+	assert.deepEqual(logs, [
+		'Granola Template Management stage=cleanup status=failed',
+		'Granola Template Management stage=orchestration status=failed httpStatus=unknown',
+	]);
 });
 ```
 
@@ -433,8 +435,8 @@ try {
 	if (createdPanel?.id) {
 		try {
 			await client.deleteDocumentPanel(createdPanel.id);
-		} catch (cleanupError) {
-			console.error('Granola Template Management cleanup failed for "' + (doc.title || doc.id) + '":', cleanupError);
+		} catch {
+			console.error('Granola Template Management stage=cleanup status=failed');
 		}
 	}
 	throw error;
@@ -445,7 +447,7 @@ Keep the outer failure handler non-blocking. Update progress phases to `Creating
 
 ### Task 5 Compatibility Finding (2026-07-17)
 
-Controlled validation on disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca` established that native generation succeeds with `auto: false`. The scheduled plugin cycle and a sanitized direct probe returned HTTP 409 when sent `auto: true`; cleanup succeeded. This corrects the binding request requirement above without changing the earlier spike evidence: every user-configured Template Management generation sends `auto: false`, while the five-minute plugin scheduling remains automatic. Generic orchestration failures record only `httpStatus=<numeric>` or `httpStatus=unknown` and never error payloads or content.
+Controlled validation on disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca` established that native generation succeeds with `auto: false`. The scheduled plugin cycle and a sanitized direct probe returned HTTP 409 when sent `auto: true`; cleanup succeeded. This corrects the binding request requirement above without changing the earlier spike evidence: every user-configured Template Management generation sends `auto: false`, while the configured plugin scheduler remains automatic. Generic orchestration failures record only `httpStatus=<numeric>` or `httpStatus=unknown` and never error payloads or content.
 
 - [ ] **Step 4: Remove the legacy write path and verify no callers remain**
 

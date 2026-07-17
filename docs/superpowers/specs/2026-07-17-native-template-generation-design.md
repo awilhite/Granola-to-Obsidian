@@ -23,7 +23,7 @@ This observation graduates `generate-summary` from spike to implementation. Synt
 
 ### Compatibility Validation Update (2026-07-17)
 
-On disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca`, native generation succeeded with `auto: false`. A scheduled plugin cycle and a sanitized direct probe both received HTTP 409 with `auto: true`; cleanup succeeded. Therefore every user-configured Template Management generation request must send `auto: false`, even when the plugin sync source is automatic. The five-minute plugin scheduler remains automatic because this private request field represents Granola background-generation eligibility, not the plugin's sync source. Generic orchestration failures may log only a numeric HTTP status or `unknown`; they must not log response bodies, messages, titles, transcripts, generated content, or credentials.
+On disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca`, native generation succeeded with `auto: false`. A scheduled plugin cycle and a sanitized direct probe both received HTTP 409 with `auto: true`; cleanup succeeded. Therefore every user-configured Template Management generation request must send `auto: false`, even when the plugin sync source is automatic. The configured plugin scheduler remains automatic because this private request field represents Granola background-generation eligibility, not the plugin's sync source. Generic orchestration failures may log only a numeric HTTP status or `unknown`; they must not log response bodies, messages, titles, transcripts, generated content, or credentials.
 
 ## Goals
 
