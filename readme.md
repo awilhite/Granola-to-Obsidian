@@ -238,12 +238,15 @@ Automatically ensure a selected Granola template exists in Granola before the pl
 - **Granola Template**: Select the Granola template to enforce before sync
 
 #### Behavior:
-- The plugin checks whether the selected template already exists on each Granola note
+- For `Update when Granola changed`, the plugin checks template presence before deciding that an existing Obsidian note is already current, so a missing template can recover without another Granola edit
+- Populated matching panels embedded in Granola's normal document response make the ready path cheap; missing or ambiguous candidates receive a private panel check
+- `Never update existing notes` remains absolute: existing notes skip Template Management and all other update work
 - If the selected template is missing, the plugin creates a panel and asks Granola's native Yjs-backed `generate-summary` flow to populate it
+- Each sync run generates at most one new panel; additional missing candidates continue normal sync/skip behavior and are reported as `template-deferred` for later runs
 - Every Template Management generation request sends Granola `auto: false`, including a scheduled sync; the configured plugin scheduler remains automatic, while this private flag controls Granola background-generation eligibility
 - Before importing, the plugin verifies that the generated panel has persisted structured content, including persisted document nodes
 - If the selected template already exists, the plugin leaves it alone
-- If generation, verification, or refresh fails after a panel is created, the plugin attempts a best-effort soft deletion of the newly created panel so a later sync can retry cleanly; cleanup is not guaranteed and the plugin does not perform a final emptiness check before attempting it
+- A verified populated panel is preserved if the final document refresh fails. After generation or verification failure, the plugin deletes its created panel only when a private re-fetch proves that exact panel is active and empty; ambiguous or populated panels are preserved for safety
 - Empty matching panels with reliable timestamps are protected as potentially in progress until they are at least 10 minutes old, then become eligible for cleanup before a retry; timestamp-less or invalid-timestamp panels remain `template-deferred` until Granola supplies a reliable timestamp or an operator resolves them
 - Deferred panels are visible in sync diagnostics as `template-deferred` (for example, `1 template-deferred`)
 - If template management fails, the plugin logs the failure and continues syncing the note with whatever Granola content is currently available

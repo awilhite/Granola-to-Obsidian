@@ -47,7 +47,7 @@ On disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca`, native generation
 
 ### Native-only generation
 
-Create the panel, invoke `generate-summary`, and verify Granola's persisted structured result. Delete an empty panel after failure so a later sync retries.
+Create the panel, invoke `generate-summary`, and verify Granola's persisted structured result. After failure, delete only the exact plugin-created panel that a private re-fetch proves is active and empty; preserve ambiguous or populated panels.
 
 This is the selected approach because it follows the observed current Granola flow and cannot silently recreate the known malformed storage shape.
 
@@ -94,12 +94,13 @@ The stream parser records event classes without depending on generated prose. St
 
 For a document missing the selected template:
 
-1. Fetch templates, source document, metadata, and transcript as today.
-2. Create an empty panel for the selected template.
-3. Call native generation using the returned panel ID.
-4. Poll `get-document-panels` for the created panel until it has `content_updated_at` and structured content.
-5. Refresh the source document so its Granola `updated_at` participates in the normal update decision.
-6. Expose the persisted panel content through the existing rendering path.
+1. Before the `changed` up-to-date decision, accept a populated matching panel embedded in the normal document response as the cheap ready path; privately verify missing or ambiguous candidates. Existing notes using `never` bypass Template Management entirely.
+2. If the per-run generation budget remains, fetch templates, source document, metadata, and transcript as today. Generate at most one new panel per sync run; defer additional missing candidates without failing normal sync.
+3. Create an empty panel for the selected template.
+4. Call native generation using the returned panel ID.
+5. Poll `get-document-panels` for the created panel until it has `content_updated_at` and structured content.
+6. Refresh the source document and choose the newest valid timestamp among the original document, verified panel, and refreshed document before the normal update decision.
+7. Expose the persisted panel content through the existing rendering path.
 
 The existing-template path remains unchanged and never regenerates an active matching panel.
 
@@ -117,15 +118,15 @@ The plugin must use the refreshed panel rather than streamed text when construct
 
 ### Failure and retry
 
-If panel creation succeeds but generation or verification fails, mark the newly created empty panel deleted. Cleanup failure is logged separately and must not hide the original generation error.
+If panel creation succeeds but generation or verification fails, privately re-fetch the created panel. Delete it only when the exact plugin-created panel is active and definitely empty. Preserve ambiguous, missing-from-response, or populated panels; cleanup uncertainty must not destroy content or hide the original generation error. Once structured persisted content is verified, a later document-refresh failure never deletes that panel.
 
 The plugin then:
 
 - increments template-management failure diagnostics
-- logs the document and failed stage without transcript or generated content
+- logs only safe stage context and a numeric HTTP status or `unknown`, without document titles, transcript, generated content, response bodies, or credentials
 - continues normal sync with the source content already available
 
-No legacy generation fallback runs. Because the failed panel is deleted, the next sync sees the template as missing and retries.
+No legacy generation fallback runs. A safely deleted empty panel is retryable on a later sync. Preserved empty panels follow the existing in-progress/stale policy, while ambiguous or populated panels are deferred rather than destructively retried. Each sync run can generate at most one new panel, so other missing candidates are `template-deferred` until a later run.
 
 ### Legacy normalization
 
@@ -159,7 +160,7 @@ Policy: retain the plugin's sync-run guard, check before creation, and re-fetch 
 
 ### Observability
 
-Policy: retain attempted, applied, failed, and skipped counters. Add stage-specific failure context and generation/verification duration without logging transcript text, generated prose, tokens, or credentials. Silent failure is not acceptable.
+Policy: retain attempted, applied, failed, skipped, and deferred counters. Add stage-specific failure context and generation/verification duration without logging document titles, transcript text, generated prose, response bodies, tokens, or credentials. Silent failure is not acceptable.
 
 ## Testing
 
@@ -169,7 +170,9 @@ Policy: retain attempted, applied, failed, and skipped counters. Add stage-speci
 - Stream parsing recognizes panel, content, generated-lines, and Yjs events.
 - Existing matching panel skips creation and generation.
 - Successful verification uses persisted structured panel content.
-- Generation failure deletes the newly created panel and continues sync.
+- Generation failure deletes the newly created panel only after a re-fetch proves it is active and empty; ambiguous or populated panels are preserved.
+- Verified populated panels survive document-refresh failure and retain the newest valid source/panel/refresh timestamp.
+- Process-level coverage confirms `changed` checks templates before skipping, `never` bypasses template work, and one generation per run defers additional missing candidates.
 - Cleanup failure preserves the original failure result and reports cleanup separately.
 - Legacy malformed-summary tests continue passing.
 - Auth and API-client regression tests continue passing.
@@ -185,7 +188,7 @@ Policy: retain attempted, applied, failed, and skipped counters. Add stage-speci
 
 ### Failure validation
 
-Use an injected client failure in automated tests rather than corrupting a live meeting. Confirm the empty panel is deleted and the document continues through normal sync.
+Use injected client failures in automated tests rather than corrupting a live meeting. Confirm a re-fetched definitely empty plugin-created panel is deleted, while verified, populated, or ambiguous panels are preserved and the document continues through normal sync.
 
 ## Rollout
 

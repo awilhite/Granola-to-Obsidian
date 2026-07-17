@@ -459,6 +459,18 @@ test('an older document refresh cannot regress the verified panel timestamp', as
 	assert.equal(result.updated_at, persistedPanel.content_updated_at);
 });
 
+test('panel generation cannot regress a newer source document timestamp', async () => {
+	const { plugin } = templatePluginFixture({ outcome: 'refresh-stale' });
+	const sourceUpdatedAt = '2026-07-17T22:07:05.566Z';
+	const result = await plugin.ensureGranolaTemplateForDocument({
+		id: 'doc-1',
+		title: 'Testing',
+		updated_at: sourceUpdatedAt,
+	}, authContext());
+
+	assert.equal(result.updated_at, sourceUpdatedAt);
+});
+
 test('generation failure cleanup deletes only a re-fetched definitely empty plugin panel', async () => {
 	const emptyCreatedPanel = {
 		id: 'panel-1',

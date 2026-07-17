@@ -2687,18 +2687,21 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				failedStage = 'verify';
 				const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanelId, selectedTemplate.id);
 				doc.privatePanels = [persistedPanel, ...doc.privatePanels.filter((panel) => panel.id !== persistedPanel.id)];
-				if (persistedPanel.content_updated_at) {
-					doc.updated_at = persistedPanel.content_updated_at;
-				}
+				const sourceUpdatedAt = doc.updated_at;
+				const getNewestValidTimestamp = (...timestamps) => timestamps.reduce((newest, timestamp) => {
+					const time = new Date(timestamp).getTime();
+					return Number.isFinite(time) && (!newest || time > newest.time)
+						? { timestamp, time }
+						: newest;
+				}, null)?.timestamp;
+				doc.updated_at = getNewestValidTimestamp(sourceUpdatedAt, persistedPanel.content_updated_at) || doc.updated_at;
 				try {
 					const refreshedDoc = await client.getDocumentBatch(doc.id);
-					if (refreshedDoc?.updated_at) {
-						const refreshedTime = new Date(refreshedDoc.updated_at).getTime();
-						const currentTime = new Date(doc.updated_at).getTime();
-						if (!Number.isFinite(currentTime) || (Number.isFinite(refreshedTime) && refreshedTime > currentTime)) {
-							doc.updated_at = refreshedDoc.updated_at;
-						}
-					}
+					doc.updated_at = getNewestValidTimestamp(
+						sourceUpdatedAt,
+						persistedPanel.content_updated_at,
+						refreshedDoc?.updated_at
+					) || doc.updated_at;
 				} catch (refreshError) {
 					logStage('refresh', { status: 'failed' });
 				}
