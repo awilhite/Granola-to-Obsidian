@@ -17,6 +17,8 @@
 - Delete a newly created empty panel after generation or verification failure so a later sync can retry.
 - Persisted panel state, not stream events, is the source of truth.
 - Do not log credentials, transcript text, generated prose, or full private API payloads.
+- Always send `auto: false` for Template Management generation, regardless of manual or scheduled plugin sync source; the five-minute scheduler remains automatic.
+- For generic orchestration failures, log only a numeric HTTP status or `unknown`.
 - Do not add a runtime dependency or a new user-facing setting.
 
 ---
@@ -126,7 +128,7 @@ test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 		[{ source: 'microphone', text: 'Test transcript' }],
 		{ id: 'template-1', title: 'Default', sections: [] },
 		'panel-1',
-		{ auto: true }
+		{ auto: false }
 	);
 
 	assert.equal(requests[0].url, 'https://stream.api.granola.ai/v1/generate-summary');
@@ -138,7 +140,7 @@ test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 	assert.equal(body.template_slug, 'template-1');
 	assert.equal(body.ydoc_version, 1);
 	assert.match(body.ydoc_state, /^[A-Za-z0-9+/]+=*$/);
-	assert.equal(body.auto, true);
+	assert.equal(body.auto, false);
 	assert.deepEqual(result.eventTypes, ['panel_id', 'content_delta', 'generated_lines', 'ydoc_state']);
 });
 ```
@@ -421,7 +423,7 @@ try {
 		transcriptEntries || [],
 		selectedTemplate,
 		createdPanel.id,
-		{ auto: this.activeSyncDiagnostics?.source === 'auto' }
+		{ auto: false }
 	);
 	const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanel.id, selectedTemplate.id);
 	const refreshedDoc = await client.getDocumentBatch(doc.id);
@@ -440,6 +442,10 @@ try {
 ```
 
 Keep the outer failure handler non-blocking. Update progress phases to `Creating template panel`, `Generating`, and `Verifying generated template`. Log stage and durations, never payload content.
+
+### Task 5 Compatibility Finding (2026-07-17)
+
+Controlled validation on disposable document `6f01045f-be6e-4492-b370-8f4e6fdfacca` established that native generation succeeds with `auto: false`. The scheduled plugin cycle and a sanitized direct probe returned HTTP 409 when sent `auto: true`; cleanup succeeded. This corrects the binding request requirement above without changing the earlier spike evidence: every user-configured Template Management generation sends `auto: false`, while the five-minute plugin scheduling remains automatic. Generic orchestration failures record only `httpStatus=<numeric>` or `httpStatus=unknown` and never error payloads or content.
 
 - [ ] **Step 4: Remove the legacy write path and verify no callers remain**
 
