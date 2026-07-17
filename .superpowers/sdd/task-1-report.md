@@ -121,13 +121,13 @@ test at tests/granola-template-generation.test.js:107:1
 ✖ parseGenerateSummaryStream marks malformed chunks as unparsed without retaining content (2.504125ms)
   AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
   + actual - expected
-  
+
     [
       'panel_id',
   -   'unparsed',
       'content_delta'
     ]
-  
+
       at TestContext.<anonymous> (/Users/austinwilhite/Projects/granola-sync-plus-plugin/tests/granola-template-generation.test.js:118:9)
       at Test.runInAsyncScope (node:async_hooks:214:14)
       at Test.run (node:internal/test_runner/test:1047:25)
