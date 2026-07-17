@@ -2444,6 +2444,55 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		try {
 			const client = this.getGranolaPrivateClient(authContext);
+			const isActiveMatchingTemplatePanel = (panel) => Boolean(
+				panel &&
+				!panel.deleted_at &&
+				panel.was_trashed !== true &&
+				panel.template_slug === this.settings.granolaTemplateId
+			);
+			const hasPersistedTemplateContent = (panel) => {
+				if (!isActiveMatchingTemplatePanel(panel)) {
+					return false;
+				}
+				if (typeof panel.content === 'string') {
+					return panel.content.trim().length > 0;
+				}
+				return Boolean(
+					panel.content &&
+					panel.content.type === 'doc' &&
+					Array.isArray(panel.content.content) &&
+					panel.content.content.some((node) =>
+						node !== null &&
+						typeof node === 'object' &&
+						typeof node.type === 'string' &&
+						node.type.length > 0
+					)
+				);
+			};
+			const logStage = (stage, details = {}) => {
+				console.log(
+					'Granola Template Management stage=' + stage +
+					Object.entries(details)
+						.map(([key, value]) => ' ' + key + '=' + value)
+						.join('')
+				);
+			};
+			const logStageFailure = (stage) => {
+				console.error('Granola Template Management stage=' + stage + ' status=failed');
+			};
+			const deletePanelBestEffort = async (panelId, stage) => {
+				const cleanupStartedAt = Date.now();
+				try {
+					await client.deleteDocumentPanel(panelId);
+					logStage('cleanup', {
+						stage,
+						panelId,
+						durationMs: Date.now() - cleanupStartedAt,
+					});
+				} catch (cleanupError) {
+					logStageFailure('cleanup');
+				}
+			};
 			this.updateActiveSyncProgress({
 				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: 'Checking template panels',
@@ -2451,14 +2500,31 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			});
 			const existingPanels = await client.getDocumentPanels(doc.id);
 			doc.privatePanels = Array.isArray(existingPanels) ? existingPanels : [];
-
-			const existingTemplatePanel = this.getGranolaTemplatePanel(doc.privatePanels, this.settings.granolaTemplateId);
+			const baselineActiveMatchingPanelIds = new Set(
+				doc.privatePanels
+					.filter(isActiveMatchingTemplatePanel)
+					.map((panel) => panel.id)
+					.filter(Boolean)
+			);
+			const existingTemplatePanel = doc.privatePanels.find(hasPersistedTemplateContent);
 			if (existingTemplatePanel) {
 				this.templateManagementStats.skipped++;
 				if (this.activeSyncDiagnostics) {
 					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 				}
 				return doc;
+			}
+			for (const stalePanel of doc.privatePanels.filter(isActiveMatchingTemplatePanel)) {
+				if (!stalePanel.id) {
+					continue;
+				}
+				const cleanupStartedAt = Date.now();
+				await client.deleteDocumentPanel(stalePanel.id);
+				logStage('cleanup', {
+					stage: 'stale-panel',
+					panelId: stalePanel.id,
+					durationMs: Date.now() - cleanupStartedAt,
+				});
 			}
 
 			this.templateManagementStats.attempted++;
@@ -2490,10 +2556,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				currentTemplateElapsedMs: 0,
 			});
 
-			let createdPanel = null;
+			let createdPanelId = null;
+			let creationAttempted = false;
+			let failedStage = 'create';
 			try {
 				const creationStartedAt = Date.now();
-				createdPanel = await client.createDocumentPanel(
+				creationAttempted = true;
+				const createdPanel = await client.createDocumentPanel(
 					doc.id,
 					selectedTemplate.id,
 					selectedTemplate.title || 'Summary'
@@ -2501,11 +2570,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				if (!createdPanel || !createdPanel.id) {
 					throw new Error('Granola template panel could not be created');
 				}
-				console.log(
-					`Granola Template Management created "${selectedTemplate.title}" panel for "${doc.title || doc.id}" in ${Date.now() - creationStartedAt}ms`
-				);
+				createdPanelId = createdPanel.id;
+				logStage('create', { panelId: createdPanelId, durationMs: Date.now() - creationStartedAt });
 
 				const generationStartedAt = Date.now();
+				failedStage = 'generate';
 				this.updateActiveSyncProgress({
 					currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 					currentPhase: 'Generating',
@@ -2517,13 +2586,11 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					metadata || {},
 					transcriptEntries || [],
 					selectedTemplate,
-					createdPanel.id,
+					createdPanelId,
 					{ auto: this.activeSyncDiagnostics?.source === 'auto' }
 				);
 				const generationDurationMs = Date.now() - generationStartedAt;
-				console.log(
-					`Granola Template Management generated "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${generationDurationMs}ms`
-				);
+				logStage('generate', { panelId: createdPanelId, durationMs: generationDurationMs });
 
 				this.updateActiveSyncProgress({
 					currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
@@ -2532,21 +2599,29 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					currentTemplateElapsedMs: generationDurationMs,
 				});
 				const verificationStartedAt = Date.now();
-				const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanel.id, selectedTemplate.id);
+				failedStage = 'verify';
+				const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanelId, selectedTemplate.id);
+				failedStage = 'refresh';
 				const refreshedDoc = await client.getDocumentBatch(doc.id);
 				doc.privatePanels = [persistedPanel, ...doc.privatePanels.filter((panel) => panel.id !== persistedPanel.id)];
 				if (refreshedDoc?.updated_at) {
 					doc.updated_at = refreshedDoc.updated_at;
 				}
-				console.log(
-					`Granola Template Management verified "${selectedTemplate.title}" for "${doc.title || doc.id}" in ${Date.now() - verificationStartedAt}ms`
-				);
+				logStage('verify', { panelId: createdPanelId, durationMs: Date.now() - verificationStartedAt });
 			} catch (error) {
-				if (createdPanel?.id) {
+				if (createdPanelId) {
+					await deletePanelBestEffort(createdPanelId, failedStage);
+				} else if (creationAttempted) {
 					try {
-						await client.deleteDocumentPanel(createdPanel.id);
-					} catch (cleanupError) {
-						console.error('Granola Template Management cleanup failed for "' + (doc.title || doc.id) + '":', cleanupError);
+						const recoveredPanels = await client.getDocumentPanels(doc.id);
+						const newlyAppearingPanels = (Array.isArray(recoveredPanels) ? recoveredPanels : [])
+							.filter(isActiveMatchingTemplatePanel)
+							.filter((panel) => panel.id && !baselineActiveMatchingPanelIds.has(panel.id));
+						if (newlyAppearingPanels.length === 1 && !hasPersistedTemplateContent(newlyAppearingPanels[0])) {
+							await deletePanelBestEffort(newlyAppearingPanels[0].id, 'create-recovery');
+						}
+					} catch (recoveryError) {
+						logStageFailure('create-recovery');
 					}
 				}
 				throw error;
@@ -2556,13 +2631,13 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (this.activeSyncDiagnostics) {
 				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 			}
-			console.log(`Granola Template Management applied "${selectedTemplate.title}" to "${doc.title || doc.id}"`);
+			logStage('complete', { status: 'applied' });
 		} catch (error) {
 			this.templateManagementStats.failed++;
 			if (this.activeSyncDiagnostics) {
 				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 			}
-			console.error('Granola Template Management failed for "' + (doc.title || doc.id) + '":', error);
+			console.error('Granola Template Management stage=orchestration status=failed');
 		} finally {
 			this.updateActiveSyncProgress({
 				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',

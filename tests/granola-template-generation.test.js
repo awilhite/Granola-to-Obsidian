@@ -104,11 +104,18 @@ function nativeStreamFixture() {
 	].join('-----CHUNK_BOUNDARY-----');
 }
 
-function templatePluginFixture({ outcome, existingPanel = null, source = 'manual' }) {
+function templatePluginFixture({
+	outcome = 'success',
+	existingPanel = null,
+	panelSnapshots = null,
+	source = 'manual',
+	createResult = { id: 'panel-1' },
+} = {}) {
 	const calls = [];
-	const errors = [];
+	const logs = [];
 	let generateOptions = null;
-	const sourceDoc = { id: 'doc-1', title: 'Testing', updated_at: 'before' };
+	const sourceDoc = { id: 'doc-1', title: 'PRIVATE-MEETING-TITLE', updated_at: 'before' };
+	const snapshots = panelSnapshots || [existingPanel ? [existingPanel] : []];
 	const persistedPanel = {
 		id: 'panel-1',
 		template_slug: 'template-1',
@@ -117,21 +124,34 @@ function templatePluginFixture({ outcome, existingPanel = null, source = 'manual
 		content: { type: 'doc', content: [{ type: 'heading' }] },
 	};
 	const client = {
-		getDocumentPanels: async () => { calls.push('getPanels'); return existingPanel ? [existingPanel] : []; },
+		getDocumentPanels: async () => {
+			calls.push('getPanels');
+			return snapshots[Math.min(calls.filter((call) => call === 'getPanels').length - 1, snapshots.length - 1)];
+		},
 		getDocumentBatch: async () => {
 			if (!calls.includes('createPanel')) { calls.push('getContext'); return sourceDoc; }
 			calls.push('refreshDocument');
+			if (outcome === 'refresh-failure') throw new Error('refresh failed');
 			return { ...sourceDoc, updated_at: 'after' };
 		},
 		getDocumentMetadata: async () => ({}),
 		getDocumentTranscript: async () => [],
-		createDocumentPanel: async () => { calls.push('createPanel'); return { id: 'panel-1' }; },
+		createDocumentPanel: async () => {
+			calls.push('createPanel');
+			if (outcome === 'create-throws') throw new Error('create response lost');
+			return createResult;
+		},
 		generateDocumentPanel: async (...args) => {
 			calls.push('generate');
 			generateOptions = args[5];
-			if (outcome !== 'success') throw new Error('generation failed');
+			if (outcome === 'generation-failure') throw new Error('generation failed');
+			if (outcome === 'generation-and-cleanup-failure') throw new Error('generation failed');
 		},
-		waitForGeneratedPanel: async () => { calls.push('waitForPanel'); return persistedPanel; },
+		waitForGeneratedPanel: async () => {
+			calls.push('waitForPanel');
+			if (outcome === 'verification-failure') throw new Error('verification failed');
+			return persistedPanel;
+		},
 		deleteDocumentPanel: async () => {
 			calls.push('deletePanel');
 			if (outcome === 'generation-and-cleanup-failure') throw new Error('cleanup failed');
@@ -139,8 +159,8 @@ function templatePluginFixture({ outcome, existingPanel = null, source = 'manual
 	};
 	const testConsole = {
 		...console,
-		log: () => {},
-		error: (...args) => errors.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
+		log: (...args) => logs.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
+		error: (...args) => logs.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
 	};
 	const method = extractMethod('ensureGranolaTemplateForDocument', testConsole);
 	const plugin = {
@@ -152,10 +172,10 @@ function templatePluginFixture({ outcome, existingPanel = null, source = 'manual
 		getGranolaPrivateClient: () => client,
 		getGranolaTemplatePanel: (panels, templateId) => panels.find((panel) => panel.template_slug === templateId) || null,
 		getPanelMarkdownContent: () => '',
-		fetchGranolaTemplates: async () => [{ id: 'template-1', title: 'Default', sections: [] }],
+		fetchGranolaTemplates: async () => [{ id: 'template-1', title: 'PRIVATE-TEMPLATE-TITLE', sections: [] }],
 		updateActiveSyncProgress: () => {},
 	};
-	return { plugin, calls, errors, sourceDoc, persistedPanel, getGenerateOptions: () => generateOptions };
+	return { plugin, calls, logs, sourceDoc, persistedPanel, getGenerateOptions: () => generateOptions };
 }
 
 test('template orchestration uses persisted structured panel content', async () => {
@@ -166,6 +186,7 @@ test('template orchestration uses persisted structured panel content', async () 
 	assert.equal(result.privatePanels[0], persistedPanel);
 	assert.equal(result.granolaTemplateManagementMarkdown, undefined);
 	assert.equal(getGenerateOptions().auto, true);
+	assert.equal(result.updated_at, 'after');
 	assert.equal(plugin.templateManagementStats.applied, 1);
 });
 
@@ -178,12 +199,13 @@ test('generation failure deletes the new panel and returns the source document',
 	assert.equal(plugin.templateManagementStats.failed, 1);
 });
 
-test('cleanup failure does not replace the original generation error', async () => {
-	const { plugin, errors } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
+test('cleanup failure preserves the non-blocking generation failure outcome', async () => {
+	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 
-	assert.match(errors.join('\n'), /generation failed/);
-	assert.match(errors.join('\n'), /cleanup failed/);
+	assert.equal(plugin.templateManagementStats.failed, 1);
+	assert.match(logs.join('\n'), /stage=cleanup status=failed/);
+	assert.match(logs.join('\n'), /stage=orchestration status=failed/);
 });
 
 test('existing template panel skips native generation', async () => {
@@ -198,6 +220,92 @@ test('existing template panel skips native generation', async () => {
 	assert.equal(result.privatePanels[0], existingPanel);
 	assert.deepEqual(calls, ['getPanels']);
 	assert.equal(plugin.templateManagementStats.skipped, 1);
+});
+
+test('manual template generation sends auto false', async () => {
+	const { plugin, getGenerateOptions } = templatePluginFixture({ source: 'manual' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.equal(getGenerateOptions().auto, false);
+});
+
+test('verification failure deletes the new panel', async () => {
+	const { plugin, calls } = templatePluginFixture({ outcome: 'verification-failure' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls.slice(-2), ['waitForPanel', 'deletePanel']);
+});
+
+test('refresh failure deletes the new panel', async () => {
+	const { plugin, calls } = templatePluginFixture({ outcome: 'refresh-failure' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls.slice(-2), ['refreshDocument', 'deletePanel']);
+});
+
+test('ambiguous create cleanup deletes one newly appearing empty panel', async () => {
+	const recoveredPanel = { id: 'panel-recovered', template_slug: 'template-1', content: '' };
+	const { plugin, calls } = templatePluginFixture({
+		outcome: 'create-throws',
+		panelSnapshots: [[], [recoveredPanel]],
+	});
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'getPanels', 'deletePanel']);
+});
+
+test('ambiguous create leaves multiple new panels untouched', async () => {
+	const { plugin, calls } = templatePluginFixture({
+		createResult: {},
+		panelSnapshots: [[], [
+			{ id: 'panel-a', template_slug: 'template-1', content: '' },
+			{ id: 'panel-b', template_slug: 'template-1', content: '' },
+		]],
+	});
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.equal(calls.includes('deletePanel'), false);
+});
+
+test('ambiguous create leaves a newly appearing populated panel untouched', async () => {
+	const { plugin, calls } = templatePluginFixture({
+		outcome: 'create-throws',
+		panelSnapshots: [[
+			{
+				id: 'panel-concurrent',
+				template_slug: 'template-1',
+				content: { type: 'doc', content: [{ type: 'heading' }] },
+			},
+		]],
+	});
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.equal(calls.includes('deletePanel'), false);
+});
+
+test('ambiguous create does not delete an empty panel beside a concurrent populated panel', async () => {
+	const { plugin, calls } = templatePluginFixture({
+		outcome: 'create-throws',
+		panelSnapshots: [[], [
+			{ id: 'panel-empty', template_slug: 'template-1', content: '' },
+			{
+				id: 'panel-concurrent',
+				template_slug: 'template-1',
+				content: { type: 'doc', content: [{ type: 'heading' }] },
+			},
+		]],
+	});
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.equal(calls.includes('deletePanel'), false);
+});
+
+test('an empty matching panel is removed before a retry creates a fresh panel', async () => {
+	const emptyPanel = { id: 'panel-empty', template_slug: 'template-1', content: '' };
+	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels', 'deletePanel', 'getContext', 'createPanel', 'generate', 'waitForPanel', 'refreshDocument']);
+});
+
+test('template orchestration logs never include meeting or template titles', async () => {
+	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'PRIVATE-MEETING-TITLE' }, authContext());
+	const capturedLogs = logs.join('\n');
+	assert.equal(capturedLogs.includes('PRIVATE-MEETING-TITLE'), false);
+	assert.equal(capturedLogs.includes('PRIVATE-TEMPLATE-TITLE'), false);
 });
 
 test('generateDocumentPanel sends the native Yjs-backed request', async () => {
