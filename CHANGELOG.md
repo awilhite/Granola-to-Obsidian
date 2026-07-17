@@ -17,6 +17,8 @@ All notable changes to this project will be documented in this file.
   - `Update when Granola changed`
   - `Always rewrite existing notes`
 - **🔄 Quieter routine sync checks**: Auto-sync now shows a simple `Syncing` status during lightweight per-note scans and defers template management work for existing notes until a rewrite is actually needed
+- **Native template generation**: Replaced direct Markdown panel writeback with Granola's Yjs-backed `generate-summary` flow, preventing automatically selected templates from being stored as collapsed ProseMirror paragraphs and making failed generation retryable.
+- **Template generation safeguards**: The plugin verifies persisted structured content, cleans up empty failed panels before retrying, protects potentially in-progress empty panels for 10 minutes, reports protected work as `template-deferred`, and continues syncing current content after a non-blocking template failure.
 - **🩹 Malformed summary normalization**: Collapsed one-line Granola summaries are now normalized before metadata extraction and note writing, including summaries returned through ProseMirror-backed panels
 - **🔐 Granola auth compatibility**: Sync now resolves newer WorkOS-style Granola sessions, refreshes them through the current `refresh-access-token` flow, and uses the refreshed session for document fetches
 - **🔁 Settings migration**: Existing installs now migrate the old `skipExistingNotes` boolean to the closest matching new behavior mode

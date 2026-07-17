@@ -239,13 +239,18 @@ Automatically ensure a selected Granola template exists in Granola before the pl
 
 #### Behavior:
 - The plugin checks whether the selected template already exists on each Granola note
-- If the selected template is missing, the plugin generates it in Granola first and then continues normal sync
+- If the selected template is missing, the plugin creates a panel and asks Granola's native Yjs-backed `generate-summary` flow to populate it
+- Before importing, the plugin verifies that the generated panel has persisted structured content, including persisted document nodes
 - If the selected template already exists, the plugin leaves it alone
+- If generation, verification, or refresh fails after a panel is created, the plugin deletes that empty failed panel so a later sync can retry cleanly
+- Empty matching panels that are less than 10 minutes old, future-dated, or missing a reliable timestamp are protected as potentially in progress; the plugin defers them instead of creating a duplicate, and cleans them up on a later retry once they are stale
+- Deferred panels are visible in sync diagnostics as `template-deferred`
 - If template management fails, the plugin logs the failure and continues syncing the note with whatever Granola content is currently available
 
 #### Notes:
 - This feature is experimental and fork-specific
 - It uses private Granola APIs and may break if Granola changes their internal endpoints
+- Generation is delegated to Granola's native flow rather than writing generated Markdown directly into a panel
 - It is designed to recover richer summary output automatically, especially when a note was initially created without your preferred template
 
 ### Auto-Sync Frequency
