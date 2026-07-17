@@ -2446,6 +2446,12 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		if (this.activeSyncDiagnostics) {
 			this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 		}
+		const getSafeHttpStatus = (error) => {
+			const status = error && typeof error === 'object'
+				? (typeof error.status === 'number' ? error.status : error.response?.status)
+				: null;
+			return Number.isInteger(status) && status >= 100 && status <= 599 ? status : 'unknown';
+		};
 
 		try {
 			const client = this.getGranolaPrivateClient(authContext);
@@ -2633,7 +2639,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					transcriptEntries || [],
 					selectedTemplate,
 					createdPanelId,
-					{ auto: this.activeSyncDiagnostics?.source === 'auto' }
+					{ auto: false }
 				);
 				const generationDurationMs = Date.now() - generationStartedAt;
 				logStage('generate', { panelId: createdPanelId, durationMs: generationDurationMs });
@@ -2683,7 +2689,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			if (this.activeSyncDiagnostics) {
 				this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 			}
-			console.error('Granola Template Management stage=orchestration status=failed');
+				console.error(
+					'Granola Template Management stage=orchestration status=failed httpStatus=' + getSafeHttpStatus(error)
+				);
 		} finally {
 			this.updateActiveSyncProgress({
 				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',

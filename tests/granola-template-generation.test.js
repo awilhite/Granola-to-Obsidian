@@ -152,6 +152,11 @@ function templatePluginFixture({
 			generateOptions = args[5];
 			if (outcome === 'generation-failure') throw new Error('generation failed');
 			if (outcome === 'generation-and-cleanup-failure') throw new Error('generation failed');
+			if (outcome === 'generation-409') {
+				const error = new Error('PRIVATE-HTTP-BODY PRIVATE-GENERATED-CONTENT');
+				error.status = 409;
+				throw error;
+			}
 		},
 		waitForGeneratedPanel: async () => {
 			calls.push('waitForPanel');
@@ -185,14 +190,14 @@ function templatePluginFixture({
 	return { plugin, calls, logs, sourceDoc, persistedPanel, getGenerateOptions: () => generateOptions };
 }
 
-test('template orchestration uses persisted structured panel content', async () => {
+test('auto-source template orchestration sends auto false and uses persisted structured panel content', async () => {
 	const { plugin, calls, persistedPanel, getGenerateOptions } = templatePluginFixture({ outcome: 'success', source: 'auto' });
 	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 
 	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'generate', 'waitForPanel', 'refreshDocument']);
 	assert.equal(result.privatePanels[0], persistedPanel);
 	assert.equal(result.granolaTemplateManagementMarkdown, undefined);
-	assert.equal(getGenerateOptions().auto, true);
+	assert.equal(getGenerateOptions().auto, false);
 	assert.equal(result.updated_at, 'after');
 	assert.equal(plugin.templateManagementStats.applied, 1);
 });
@@ -213,6 +218,17 @@ test('cleanup failure preserves the non-blocking generation failure outcome', as
 	assert.equal(plugin.templateManagementStats.failed, 1);
 	assert.match(logs.join('\n'), /stage=cleanup status=failed/);
 	assert.match(logs.join('\n'), /stage=orchestration status=failed/);
+});
+
+test('template orchestration logs a numeric 409 status without sensitive failure content', async () => {
+	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-409' });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'PRIVATE-MEETING-TITLE' }, authContext());
+
+	const capturedLogs = logs.join('\n');
+	assert.match(capturedLogs, /stage=orchestration status=failed httpStatus=409/);
+	assert.equal(capturedLogs.includes('PRIVATE-HTTP-BODY'), false);
+	assert.equal(capturedLogs.includes('PRIVATE-GENERATED-CONTENT'), false);
+	assert.equal(capturedLogs.includes('PRIVATE-MEETING-TITLE'), false);
 });
 
 test('existing template panel skips native generation', async () => {
@@ -443,7 +459,7 @@ test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 		[{ source: 'microphone', text: 'Test transcript' }],
 		{ id: 'template-1', title: 'Default', sections: [] },
 		'panel-1',
-		{ auto: true }
+		{ auto: false }
 	);
 
 	assert.equal(requests[0].url, 'https://stream.api.granola.ai/v1/generate-summary');
@@ -455,7 +471,7 @@ test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 	assert.equal(body.template_slug, 'template-1');
 	assert.equal(body.ydoc_version, 1);
 	assert.match(body.ydoc_state, /^[A-Za-z0-9+/]+=*$/);
-	assert.equal(body.auto, true);
+	assert.equal(body.auto, false);
 	assert.deepEqual(result.eventTypes, ['panel_id', 'content_delta', 'generated_lines', 'ydoc_state']);
 	assert.equal(result.streamedContentLength, '<h3>Metadata</h3>'.length);
 });
