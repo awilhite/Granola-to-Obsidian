@@ -68,6 +68,10 @@ const DEFAULT_SETTINGS = {
 
 const REVIEW_TASK_TEXT = '- [ ] Review imported Granola note';
 const GRANOLA_TEMPLATE_CLIENT_VERSION = '7.71.1';
+const GRANOLA_TEMPLATE_YDOC_STATE = 'AQLW64i1DgAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoKAEEbWV0YQdoYXNTZWVkAXgA';
+const GRANOLA_TEMPLATE_YDOC_VERSION = 1;
+const GRANOLA_GENERATION_POLL_ATTEMPTS = 5;
+const GRANOLA_GENERATION_POLL_DELAY_MS = 1500;
 const POST_MEETING_SYNC_DELAY_MS = 2 * 60 * 1000;
 const MAX_SYNC_DIAGNOSTIC_HISTORY = 10;
 
@@ -324,6 +328,70 @@ class GranolaPrivateClient {
 			body: JSON.stringify(body || {}),
 		});
 		return response.text || '';
+	}
+
+	parseGenerateSummaryStream(streamText) {
+		const eventTypes = new Array();
+		let streamedContentLength = 0;
+
+		for (const chunk of String(streamText || '').split('-----CHUNK_BOUNDARY-----')) {
+			const trimmed = chunk.trim();
+			if (!trimmed) {
+				continue;
+			}
+
+			let parsed = null;
+			try {
+				parsed = JSON.parse(trimmed);
+			} catch (error) {
+				continue;
+			}
+
+			if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'panel_id')) {
+				eventTypes.push('panel_id');
+				continue;
+			}
+
+			const delta = parsed && parsed.choices && parsed.choices[0] && parsed.choices[0].delta
+				? parsed.choices[0].delta.content
+				: null;
+			if (typeof delta === 'string') {
+				eventTypes.push('content_delta');
+				streamedContentLength += delta.length;
+				continue;
+			}
+
+			if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'generated_lines')) {
+				eventTypes.push('generated_lines');
+				continue;
+			}
+
+			if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'ydoc_state')) {
+				eventTypes.push('ydoc_state');
+			}
+		}
+
+		return { eventTypes, streamedContentLength };
+	}
+
+	async generateDocumentPanel(document, metadata, transcriptEntries, template, panelId, options = {}) {
+		const streamText = await this.postText(
+			'https://stream.api.granola.ai/v1/generate-summary',
+			{
+				document_id: document.id,
+				panel_id: panelId,
+				panel_title: template.title || 'Summary',
+				prompt_slug: 'template-summary-consolidated',
+				prompt_variables: this.buildPromptVariables(document, metadata, transcriptEntries, template),
+				chat_history: [],
+				template_slug: template.id,
+				ydoc_state: GRANOLA_TEMPLATE_YDOC_STATE,
+				ydoc_version: GRANOLA_TEMPLATE_YDOC_VERSION,
+				auto: options.auto === true,
+			},
+			{ accept: '*/*' }
+		);
+		return this.parseGenerateSummaryStream(streamText);
 	}
 
 	async getPanelTemplates() {
