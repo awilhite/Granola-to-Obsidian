@@ -101,4 +101,21 @@ test('generateDocumentPanel sends the native Yjs-backed request', async () => {
 	assert.match(body.ydoc_state, /^[A-Za-z0-9+/]+=*$/);
 	assert.equal(body.auto, true);
 	assert.deepEqual(result.eventTypes, ['panel_id', 'content_delta', 'generated_lines', 'ydoc_state']);
+	assert.equal(result.streamedContentLength, '<h3>Metadata</h3>'.length);
+});
+
+test('parseGenerateSummaryStream marks malformed chunks as unparsed without retaining content', () => {
+	const { Client } = loadPrivateClient([]);
+	const client = new Client(authContext());
+	const malformedChunk = 'PRIVATE-MALFORMED-CHUNK';
+
+	const result = client.parseGenerateSummaryStream([
+		JSON.stringify({ panel_id: 'panel-1' }),
+		malformedChunk,
+		JSON.stringify({ choices: [{ delta: { content: 'safe content' } }] }),
+	].join('-----CHUNK_BOUNDARY-----'));
+
+	assert.deepEqual(result.eventTypes, ['panel_id', 'unparsed', 'content_delta']);
+	assert.equal(result.streamedContentLength, 'safe content'.length);
+	assert.equal(JSON.stringify(result).includes(malformedChunk), false);
 });

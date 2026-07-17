@@ -344,6 +344,7 @@ class GranolaPrivateClient {
 			try {
 				parsed = JSON.parse(trimmed);
 			} catch (error) {
+				eventTypes.push('unparsed');
 				continue;
 			}
 
@@ -368,7 +369,10 @@ class GranolaPrivateClient {
 
 			if (parsed && Object.prototype.hasOwnProperty.call(parsed, 'ydoc_state')) {
 				eventTypes.push('ydoc_state');
+				continue;
 			}
+
+			eventTypes.push('unparsed');
 		}
 
 		return { eventTypes, streamedContentLength };
