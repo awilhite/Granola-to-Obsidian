@@ -119,6 +119,7 @@ function templatePluginFixture({
 } = {}) {
 	const calls = [];
 	const logs = [];
+	const orchestrationFailureLines = [];
 	let generateOptions = null;
 	const sourceDoc = { id: 'doc-1', title: 'PRIVATE-MEETING-TITLE', updated_at: 'before' };
 	const snapshots = panelSnapshots || [existingPanel ? [existingPanel] : []];
@@ -153,8 +154,14 @@ function templatePluginFixture({
 			if (outcome === 'generation-failure') throw new Error('generation failed');
 			if (outcome === 'generation-and-cleanup-failure') throw new Error('generation failed');
 			if (outcome === 'generation-409') {
-				const error = new Error('PRIVATE-HTTP-BODY PRIVATE-GENERATED-CONTENT');
+				const error = new Error('PRIVATE-ERROR-MESSAGE-SENTINEL');
 				error.status = 409;
+				error.responseBody = 'PRIVATE-RESPONSE-BODY-SENTINEL';
+				error.responseText = 'PRIVATE-RESPONSE-TEXT-SENTINEL';
+				error.body = 'PRIVATE-BODY-SENTINEL';
+				error.token = 'PRIVATE-TOKEN-SENTINEL';
+				error.generatedContent = 'PRIVATE-GENERATED-CONTENT-SENTINEL';
+				error.title = 'PRIVATE-ERROR-TITLE-SENTINEL';
 				throw error;
 			}
 		},
@@ -169,10 +176,22 @@ function templatePluginFixture({
 			if (outcome === 'stale-cleanup-failure') throw new Error('stale cleanup failed');
 		},
 	};
+	const captureLog = (...args) => {
+		const line = args.map((value) => {
+			if (value instanceof Error) {
+				return JSON.stringify({ message: value.message, ...value });
+			}
+			return String(value);
+		}).join(' ');
+		logs.push(line);
+		if (line.startsWith('Granola Template Management stage=orchestration status=failed')) {
+			orchestrationFailureLines.push(line);
+		}
+	};
 	const testConsole = {
 		...console,
-		log: (...args) => logs.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
-		error: (...args) => logs.push(args.map((value) => value instanceof Error ? value.message : String(value)).join(' ')),
+		log: captureLog,
+		error: captureLog,
 	};
 	const method = extractMethod('ensureGranolaTemplateForDocument', testConsole);
 	const plugin = {
@@ -187,7 +206,15 @@ function templatePluginFixture({
 		fetchGranolaTemplates: async () => [{ id: 'template-1', title: 'PRIVATE-TEMPLATE-TITLE', sections: [] }],
 		updateActiveSyncProgress: () => {},
 	};
-	return { plugin, calls, logs, sourceDoc, persistedPanel, getGenerateOptions: () => generateOptions };
+	return {
+		plugin,
+		calls,
+		logs,
+		orchestrationFailureLines,
+		sourceDoc,
+		persistedPanel,
+		getGenerateOptions: () => generateOptions,
+	};
 }
 
 test('auto-source template orchestration sends auto false and uses persisted structured panel content', async () => {
@@ -221,14 +248,24 @@ test('cleanup failure preserves the non-blocking generation failure outcome', as
 });
 
 test('template orchestration logs a numeric 409 status without sensitive failure content', async () => {
-	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-409' });
+	const { plugin, logs, orchestrationFailureLines } = templatePluginFixture({ outcome: 'generation-409' });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'PRIVATE-MEETING-TITLE' }, authContext());
 
-	const capturedLogs = logs.join('\n');
-	assert.match(capturedLogs, /stage=orchestration status=failed httpStatus=409/);
-	assert.equal(capturedLogs.includes('PRIVATE-HTTP-BODY'), false);
-	assert.equal(capturedLogs.includes('PRIVATE-GENERATED-CONTENT'), false);
-	assert.equal(capturedLogs.includes('PRIVATE-MEETING-TITLE'), false);
+	assert.deepEqual(orchestrationFailureLines, [
+		'Granola Template Management stage=orchestration status=failed httpStatus=409',
+	]);
+	for (const sentinel of [
+		'PRIVATE-ERROR-MESSAGE-SENTINEL',
+		'PRIVATE-RESPONSE-BODY-SENTINEL',
+		'PRIVATE-RESPONSE-TEXT-SENTINEL',
+		'PRIVATE-BODY-SENTINEL',
+		'PRIVATE-TOKEN-SENTINEL',
+		'PRIVATE-GENERATED-CONTENT-SENTINEL',
+		'PRIVATE-ERROR-TITLE-SENTINEL',
+		'PRIVATE-MEETING-TITLE',
+	]) {
+		assert.equal(logs.some((line) => line.includes(sentinel)), false, `Log leaked ${sentinel}`);
+	}
 });
 
 test('existing template panel skips native generation', async () => {
