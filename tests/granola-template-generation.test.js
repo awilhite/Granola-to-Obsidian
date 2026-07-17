@@ -29,6 +29,11 @@ function extractMethod(methodName, consoleObject = console) {
 	});
 }
 
+function extractPluginMethod(methodName, context = {}) {
+	const marker = `\t${methodName}(`;
+	return vm.runInNewContext(`({ ${extractBlock(mainJs, marker)} })`, context);
+}
+
 function loadPrivateClient(responses) {
 	const requests = [];
 	const responseQueue = [...responses];
@@ -168,7 +173,7 @@ function templatePluginFixture({
 	const plugin = {
 		...method,
 		settings: { granolaTemplateId: 'template-1' },
-		templateManagementStats: { attempted: 0, applied: 0, failed: 0, skipped: 0 },
+		templateManagementStats: { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 0 },
 		activeSyncDiagnostics: { source, templateStats: {} },
 		shouldUseGranolaTemplateManagement: () => true,
 		getGranolaPrivateClient: () => client,
@@ -305,16 +310,84 @@ test('a recent empty matching panel is treated as in progress without creating a
 	const { plugin, calls, logs } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 	assert.deepEqual(calls, ['getPanels']);
-	assert.equal(plugin.templateManagementStats.skipped, 1);
+	assert.equal(plugin.templateManagementStats.deferred, 1);
+	assert.equal(plugin.templateManagementStats.skipped, 0);
 	assert.match(logs.join('\n'), /stage=stale-panel status=in-progress/);
 });
 
-test('a timestamp-less empty matching panel is treated as in progress without creating a duplicate', async () => {
+test('a null timestamp empty matching panel is deferred without creating a duplicate', async () => {
+	const emptyPanel = {
+		id: 'panel-null',
+		template_slug: 'template-1',
+		content: '',
+		content_updated_at: null,
+		updated_at: null,
+		created_at: null,
+	};
+	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.deferred, 1);
+	assert.equal(plugin.templateManagementStats.skipped, 0);
+});
+
+test('a future-dated empty matching panel is deferred without creating a duplicate', async () => {
+	const emptyPanel = {
+		id: 'panel-future',
+		template_slug: 'template-1',
+		content: '',
+		updated_at: new Date(Date.now() + (60 * 1000)).toISOString(),
+	};
+	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.deferred, 1);
+	assert.equal(plugin.templateManagementStats.skipped, 0);
+});
+
+test('a timestamp-less empty matching panel is deferred instead of ready', async () => {
 	const emptyPanel = { id: 'panel-unknown', template_slug: 'template-1', content: '' };
 	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 	assert.deepEqual(calls, ['getPanels']);
-	assert.equal(plugin.templateManagementStats.skipped, 1);
+	assert.equal(plugin.templateManagementStats.deferred, 1);
+	assert.equal(plugin.templateManagementStats.skipped, 0);
+});
+
+test('template summaries distinguish deferred panels from ready panels', () => {
+	const { getTemplateManagementStatsSummary } = extractPluginMethod('getTemplateManagementStatsSummary');
+	const { formatSyncDiagnosticsSummary } = extractPluginMethod('formatSyncDiagnosticsSummary');
+	const deferredStats = { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 2 };
+
+	assert.equal(
+		getTemplateManagementStatsSummary.call({ templateManagementStats: deferredStats }),
+		'2 template-deferred'
+	);
+	assert.equal(
+		getTemplateManagementStatsSummary.call({
+			templateManagementStats: { attempted: 0, applied: 0, failed: 0, skipped: 1, deferred: 0 },
+		}),
+		'1 template-ready'
+	);
+	assert.match(
+		formatSyncDiagnosticsSummary.call(
+			{ truncateSyncLabel: (value) => value },
+			{
+				runId: 'run-1',
+				source: 'manual',
+				docsProcessed: 0,
+				docsFetched: 0,
+				syncedCount: 0,
+				docsSkippedNotReady: 0,
+				transcriptFetches: 0,
+				myNotesHydrations: 0,
+				indexGranolaNotes: 0,
+				indexTranscriptNotes: 0,
+				templateStats: deferredStats,
+			}
+		),
+		/templates 0\/0\/0, deferred 2/
+	);
 });
 
 test('a stale empty matching panel is removed before a retry and absent from the returned document', async () => {

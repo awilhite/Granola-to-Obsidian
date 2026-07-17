@@ -805,7 +805,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			indexReadErrors: 0,
 			findByIdLookups: 0,
 			findByIdCacheHits: 0,
-			templateStats: { attempted: 0, applied: 0, failed: 0, skipped: 0 },
+			templateStats: { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 0 },
 			currentDocIndex: 0,
 			currentDocTitle: '',
 			currentPhase: '',
@@ -881,8 +881,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		const duration = diagnostics.durationMs ? `${(diagnostics.durationMs / 1000).toFixed(1)}s` : 'n/a';
 		const templateStats = diagnostics.templateStats || {};
 		const templateSummary =
-			(templateStats.applied || templateStats.failed || templateStats.skipped)
-				? `templates ${templateStats.applied || 0}/${templateStats.failed || 0}/${templateStats.skipped || 0}`
+			(templateStats.applied || templateStats.failed || templateStats.skipped || templateStats.deferred)
+				? `templates ${templateStats.applied || 0}/${templateStats.failed || 0}/${templateStats.skipped || 0}` +
+					(templateStats.deferred ? `, deferred ${templateStats.deferred}` : '')
 				: null;
 		const activePhase = diagnostics.currentPhase
 			? `phase ${diagnostics.currentPhase}${diagnostics.currentDocTitle ? ` (${this.truncateSyncLabel(diagnostics.currentDocTitle, 32)})` : ''}`
@@ -942,7 +943,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 	getTemplateManagementStatsSummary() {
 		const stats = this.templateManagementStats;
-		if (!stats || (!stats.attempted && !stats.skipped)) {
+		if (!stats || (!stats.attempted && !stats.skipped && !stats.deferred)) {
 			return '';
 		}
 
@@ -955,6 +956,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 		if (stats.skipped) {
 			parts.push(`${stats.skipped} template-ready`);
+		}
+		if (stats.deferred) {
+			parts.push(`${stats.deferred} template-deferred`);
 		}
 
 		return parts.join(', ');
@@ -1166,7 +1170,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 
 		try {
 			this.updateStatusBar('Syncing');
-			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
+			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 0 };
 
 			await this.ensureDirectoryExists();
 
@@ -2437,7 +2441,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		if (!this.templateManagementStats) {
-			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0 };
+			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 0 };
 		}
 		if (this.activeSyncDiagnostics) {
 			this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
@@ -2472,8 +2476,19 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			};
 			const getPanelActivityTime = (panel) => {
 				for (const timestamp of [panel?.content_updated_at, panel?.updated_at, panel?.created_at]) {
+					if (timestamp === null || timestamp === undefined) {
+						continue;
+					}
+					if (typeof timestamp === 'string') {
+						if (!timestamp.trim()) {
+							continue;
+						}
+					} else if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+						continue;
+					}
+
 					const time = new Date(timestamp).getTime();
-					if (!Number.isNaN(time)) {
+					if (Number.isFinite(time)) {
 						return time;
 					}
 				}
@@ -2539,7 +2554,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					status: 'in-progress',
 					panelId: inProgressPanel.id || 'unavailable',
 				});
-				this.templateManagementStats.skipped++;
+				this.templateManagementStats.deferred++;
 				if (this.activeSyncDiagnostics) {
 					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
 				}
