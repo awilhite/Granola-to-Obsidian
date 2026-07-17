@@ -402,10 +402,53 @@ class GranolaPrivateClient {
 		return await this.postJson('https://api.granola.ai/v1/get-panel-templates', {});
 	}
 
-	async getDocumentPanels(documentId) {
-		return await this.postJson('https://api.granola.ai/v1/get-document-panels', {
-			document_id: documentId,
-		});
+	async getDocumentPanels(documentId, options = {}) {
+		const body = { document_id: documentId };
+		if (options.includeYdocState === true) {
+			body.include_ydoc_state = true;
+		}
+		return await this.postJson('https://api.granola.ai/v1/get-document-panels', body);
+	}
+
+	async waitForGeneratedPanel(documentId, panelId, templateId, options = {}) {
+		const attempts = Math.min(
+			Math.max(Number.isInteger(options.attempts) ? options.attempts : GRANOLA_GENERATION_POLL_ATTEMPTS, 1),
+			GRANOLA_GENERATION_POLL_ATTEMPTS
+		);
+		const delayMs = Number.isFinite(options.delayMs)
+			? Math.max(options.delayMs, 0)
+			: GRANOLA_GENERATION_POLL_DELAY_MS;
+
+		for (let attempt = 0; attempt < attempts; attempt += 1) {
+			const panels = await this.getDocumentPanels(documentId, { includeYdocState: true });
+			const panel = Array.isArray(panels)
+				? panels.find((candidate) =>
+					candidate &&
+					!candidate.deleted_at &&
+					candidate.was_trashed !== true &&
+					candidate.id === panelId &&
+					candidate.template_slug === templateId &&
+					typeof candidate.content_updated_at === 'string' &&
+					candidate.content_updated_at.length > 0 &&
+					typeof candidate.ydoc_state === 'string' &&
+					candidate.ydoc_state.trim().length > 0 &&
+					candidate.content &&
+					candidate.content.type === 'doc' &&
+					Array.isArray(candidate.content.content) &&
+					candidate.content.content.length > 0
+				)
+				: null;
+
+			if (panel) {
+				return panel;
+			}
+
+			if (attempt < attempts - 1 && delayMs > 0) {
+				await new Promise((resolve) => setTimeout(resolve, delayMs));
+			}
+		}
+
+		throw new Error('Persisted Granola template panel was not ready');
 	}
 
 	async getDocumentBatch(documentId) {
@@ -445,6 +488,16 @@ class GranolaPrivateClient {
 			original_content: content,
 			last_viewed_at: now,
 			content_updated_at: now,
+		});
+	}
+
+	async deleteDocumentPanel(panelId) {
+		const now = new Date().toISOString();
+		return await this.postJson('https://api.granola.ai/v1/update-document-panel', {
+			id: panelId,
+			deleted_at: now,
+			updated_at: now,
+			was_trashed: true,
 		});
 	}
 

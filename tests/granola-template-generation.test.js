@@ -55,6 +55,26 @@ function loadPrivateClient(responses) {
 	return { Client: vm.runInContext(source, context), requests };
 }
 
+function clientWithPanelResponses(panelResponses) {
+	const loaded = loadPrivateClient(panelResponses.map((panels) => ({ json: panels })));
+	const client = new loaded.Client(authContext());
+	client.requests = loaded.requests;
+	return client;
+}
+
+function clientForDelete() {
+	const loaded = loadPrivateClient([{ json: {} }]);
+	const client = new loaded.Client(authContext());
+	return {
+		client,
+		request: {
+			get body() {
+				return loaded.requests[0] && loaded.requests[0].body;
+			},
+		},
+	};
+}
+
 function authContext() {
 	return {
 		token: 'access-token',
@@ -118,4 +138,47 @@ test('parseGenerateSummaryStream marks malformed chunks as unparsed without reta
 	assert.deepEqual(result.eventTypes, ['panel_id', 'unparsed', 'content_delta']);
 	assert.equal(result.streamedContentLength, 'safe content'.length);
 	assert.equal(JSON.stringify(result).includes(malformedChunk), false);
+});
+
+test('getDocumentPanels only requests Ydoc state when explicitly requested', async () => {
+	const client = clientWithPanelResponses([[], []]);
+
+	await client.getDocumentPanels('doc-1');
+	await client.getDocumentPanels('doc-1', { includeYdocState: true });
+
+	assert.deepEqual(JSON.parse(client.requests[0].body), { document_id: 'doc-1' });
+	assert.deepEqual(JSON.parse(client.requests[1].body), {
+		document_id: 'doc-1',
+		include_ydoc_state: true,
+	});
+});
+
+test('waitForGeneratedPanel returns only a structured persisted matching panel', async () => {
+	const client = clientWithPanelResponses([
+		[{ id: 'panel-1', template_slug: 'template-1', content_updated_at: null, content: '' }],
+		[{ id: 'panel-1', template_slug: 'template-1', content_updated_at: '2026-07-17T20:07:05.566Z', ydoc_state: 'state', content: { type: 'doc', content: [{ type: 'heading' }] } }],
+	]);
+	const panel = await client.waitForGeneratedPanel('doc-1', 'panel-1', 'template-1', { attempts: 2, delayMs: 0 });
+	assert.equal(panel.id, 'panel-1');
+	assert.equal(client.requests.length, 2);
+	assert.equal(JSON.parse(client.requests[0].body).include_ydoc_state, true);
+});
+
+test('waitForGeneratedPanel rejects deleted, wrong-template, and unstructured panels', async () => {
+	const client = clientWithPanelResponses([[]]);
+	await assert.rejects(
+		client.waitForGeneratedPanel('doc-1', 'panel-1', 'template-1', { attempts: 1, delayMs: 0 }),
+		/Persisted Granola template panel was not ready/
+	);
+});
+
+test('deleteDocumentPanel soft deletes without writing content', async () => {
+	const { client, request } = clientForDelete();
+	await client.deleteDocumentPanel('panel-1');
+	const body = JSON.parse(request.body);
+	assert.equal(body.id, 'panel-1');
+	assert.equal(body.was_trashed, true);
+	assert.ok(body.deleted_at);
+	assert.ok(body.updated_at);
+	assert.equal(Object.hasOwn(body, 'content'), false);
 });
