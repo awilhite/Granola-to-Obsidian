@@ -1171,6 +1171,7 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		try {
 			this.updateStatusBar('Syncing');
 			this.templateManagementStats = { attempted: 0, applied: 0, failed: 0, skipped: 0, deferred: 0 };
+			this.templateManagementGenerationBudget = 1;
 
 			await this.ensureDirectoryExists();
 
@@ -2526,6 +2527,25 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 					return false;
 				}
 			};
+			const embeddedPanels = [
+				...(Array.isArray(doc.privatePanels) ? doc.privatePanels : []),
+				...(Array.isArray(doc.panels) ? doc.panels : []),
+				...(doc.last_viewed_panel ? [doc.last_viewed_panel] : []),
+			];
+			const embeddedTemplatePanel = embeddedPanels.find(hasPersistedTemplateContent);
+			if (embeddedTemplatePanel) {
+				doc.privatePanels = [
+					embeddedTemplatePanel,
+					...(Array.isArray(doc.privatePanels)
+						? doc.privatePanels.filter((panel) => panel.id !== embeddedTemplatePanel.id)
+						: []),
+				];
+				this.templateManagementStats.skipped++;
+				if (this.activeSyncDiagnostics) {
+					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+				}
+				return doc;
+			}
 			this.updateActiveSyncProgress({
 				currentDocTitle: doc.title || doc.id || 'Untitled Granola Note',
 				currentPhase: 'Checking template panels',
@@ -2566,6 +2586,17 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 				return doc;
 			}
+			if (typeof this.templateManagementGenerationBudget !== 'number') {
+				this.templateManagementGenerationBudget = 1;
+			}
+			if (this.templateManagementGenerationBudget <= 0) {
+				logStage('budget', { status: 'deferred' });
+				this.templateManagementStats.deferred++;
+				if (this.activeSyncDiagnostics) {
+					this.activeSyncDiagnostics.templateStats = { ...this.templateManagementStats };
+				}
+				return doc;
+			}
 			for (const stalePanel of stalePanels) {
 				if (!stalePanel.id) {
 					logStageFailure('stale-panel');
@@ -2578,6 +2609,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				}
 				doc.privatePanels = doc.privatePanels.filter((panel) => panel.id !== stalePanel.id);
 			}
+
+			this.templateManagementGenerationBudget--;
 
 			this.templateManagementStats.attempted++;
 			if (this.activeSyncDiagnostics) {
@@ -2653,16 +2686,42 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				const verificationStartedAt = Date.now();
 				failedStage = 'verify';
 				const persistedPanel = await client.waitForGeneratedPanel(doc.id, createdPanelId, selectedTemplate.id);
-				failedStage = 'refresh';
-				const refreshedDoc = await client.getDocumentBatch(doc.id);
 				doc.privatePanels = [persistedPanel, ...doc.privatePanels.filter((panel) => panel.id !== persistedPanel.id)];
-				if (refreshedDoc?.updated_at) {
-					doc.updated_at = refreshedDoc.updated_at;
+				if (persistedPanel.content_updated_at) {
+					doc.updated_at = persistedPanel.content_updated_at;
+				}
+				try {
+					const refreshedDoc = await client.getDocumentBatch(doc.id);
+					if (refreshedDoc?.updated_at) {
+						const refreshedTime = new Date(refreshedDoc.updated_at).getTime();
+						const currentTime = new Date(doc.updated_at).getTime();
+						if (!Number.isFinite(currentTime) || (Number.isFinite(refreshedTime) && refreshedTime > currentTime)) {
+							doc.updated_at = refreshedDoc.updated_at;
+						}
+					}
+				} catch (refreshError) {
+					logStage('refresh', { status: 'failed' });
 				}
 				logStage('verify', { panelId: createdPanelId, durationMs: Date.now() - verificationStartedAt });
 			} catch (error) {
 				if (createdPanelId) {
-					await deletePanelBestEffort(createdPanelId, failedStage);
+					try {
+						const recoveredPanels = await client.getDocumentPanels(doc.id, { includeYdocState: true });
+						const createdPanel = (Array.isArray(recoveredPanels) ? recoveredPanels : [])
+							.find((panel) => panel?.id === createdPanelId && isActiveMatchingTemplatePanel(panel));
+						const isDefinitelyEmpty = Boolean(
+							createdPanel &&
+							typeof createdPanel.content === 'string' &&
+							createdPanel.content.trim().length === 0 &&
+							!createdPanel.content_updated_at &&
+							!createdPanel.ydoc_state
+						);
+						if (isDefinitelyEmpty) {
+							await deletePanelBestEffort(createdPanelId, failedStage);
+						}
+					} catch (recoveryError) {
+						logStageFailure('cleanup-check');
+					}
 				} else if (creationAttempted) {
 					try {
 						const recoveredPanels = await client.getDocumentPanels(doc.id);
@@ -2810,6 +2869,8 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			return true;
 		}
 
+		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
+
 		if (existingFile) {
 			if (existingNoteBehavior === 'changed') {
 				const outdated = await this.isNoteOutdated(existingFile, doc);
@@ -2820,8 +2881,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 				console.log('Note "' + title + '" has been updated in Granola, re-syncing...');
 			}
 		}
-
-		doc = await this.ensureGranolaTemplateForDocument(doc, authContext);
 
 		const enhancedNotesMarkdown = this.getEnhancedNotesMarkdown(doc);
 		const hasEnhancedNotes = enhancedNotesMarkdown && this.settings.includeEnhancedNotes;

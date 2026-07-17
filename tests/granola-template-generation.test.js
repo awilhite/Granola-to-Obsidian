@@ -139,7 +139,8 @@ function templatePluginFixture({
 			if (!calls.includes('createPanel')) { calls.push('getContext'); return sourceDoc; }
 			calls.push('refreshDocument');
 			if (outcome === 'refresh-failure') throw new Error('refresh failed');
-			return { ...sourceDoc, updated_at: 'after' };
+			if (outcome === 'refresh-stale') return { ...sourceDoc, updated_at: '2026-07-17T19:07:05.566Z' };
+			return { ...sourceDoc, updated_at: '2026-07-17T21:07:05.566Z' };
 		},
 		getDocumentMetadata: async () => ({}),
 		getDocumentTranscript: async () => [],
@@ -217,6 +218,83 @@ function templatePluginFixture({
 	};
 }
 
+function processDocumentFixture({
+	existingNoteBehavior = 'changed',
+	outdated = false,
+	ensureResult = null,
+} = {}) {
+	const calls = [];
+	const existingFile = { path: 'Meeting.md' };
+	const method = extractMethod('processDocument');
+	const plugin = {
+		...method,
+		settings: {
+			includeEnhancedNotes: true,
+			includeMyNotes: false,
+			storeTranscriptInSeparateNote: false,
+		},
+		currentSyncFileIndex: null,
+		findExistingNoteByGranolaId: async () => existingFile,
+		getExistingNoteBehavior: () => existingNoteBehavior,
+		isNoteOutdated: async (_file, doc) => {
+			calls.push(`outdated:${doc.updated_at}`);
+			return outdated || doc.updated_at === '2026-07-17T21:07:05.566Z';
+		},
+		ensureGranolaTemplateForDocument: async (doc) => {
+			calls.push('ensure');
+			return ensureResult ? ensureResult(doc) : doc;
+		},
+		getEnhancedNotesMarkdown: () => 'Summary',
+		shouldFetchTranscript: () => false,
+		getMyNotesMarkdown: () => '',
+		extractAttendeeNames: () => [],
+		generateAttendeeTags: () => [],
+		extractFolderNames: () => [],
+		generateFolderTags: () => [],
+		generateGranolaUrl: () => 'https://example.invalid',
+		buildFrontmatter: () => '---\n---\n',
+		buildNoteContent: () => '# Meeting',
+		registerGranolaFileIndexEntry: () => {},
+		updateActiveSyncProgress: () => {},
+		app: {
+			vault: {
+				process: async () => { calls.push('rewrite'); },
+			},
+		},
+	};
+	return { plugin, calls };
+}
+
+test('current changed note checks template before deciding whether to rewrite', async () => {
+	const { plugin, calls } = processDocumentFixture({
+		ensureResult: (doc) => ({ ...doc, updated_at: '2026-07-17T21:07:05.566Z' }),
+	});
+
+	const result = await plugin.processDocument({ id: 'doc-1', title: 'Testing', updated_at: 'before' }, authContext());
+
+	assert.equal(result, true);
+	assert.deepEqual(calls.slice(0, 3), ['ensure', 'outdated:2026-07-17T21:07:05.566Z', 'rewrite']);
+});
+
+test('never behavior skips all template management for an existing note', async () => {
+	const { plugin, calls } = processDocumentFixture({ existingNoteBehavior: 'never' });
+
+	const result = await plugin.processDocument({ id: 'doc-1', title: 'Testing', updated_at: 'before' }, authContext());
+
+	assert.equal(result, true);
+	assert.deepEqual(calls, []);
+});
+
+test('template failure on a current changed note does not rewrite and retries next run', async () => {
+	const { plugin, calls } = processDocumentFixture();
+	const doc = { id: 'doc-1', title: 'Testing', updated_at: 'before' };
+
+	await plugin.processDocument(doc, authContext());
+	await plugin.processDocument(doc, authContext());
+
+	assert.deepEqual(calls, ['ensure', 'outdated:before', 'ensure', 'outdated:before']);
+});
+
 test('auto-source template orchestration sends auto false and uses persisted structured panel content', async () => {
 	const { plugin, calls, persistedPanel, getGenerateOptions } = templatePluginFixture({ outcome: 'success', source: 'auto' });
 	const result = await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
@@ -225,21 +303,25 @@ test('auto-source template orchestration sends auto false and uses persisted str
 	assert.equal(result.privatePanels[0], persistedPanel);
 	assert.equal(result.granolaTemplateManagementMarkdown, undefined);
 	assert.equal(getGenerateOptions().auto, false);
-	assert.equal(result.updated_at, 'after');
+	assert.equal(result.updated_at, '2026-07-17T21:07:05.566Z');
 	assert.equal(plugin.templateManagementStats.applied, 1);
 });
 
-test('generation failure deletes the new panel and returns the source document', async () => {
+test('generation failure preserves a panel when cleanup cannot confirm it is empty', async () => {
 	const { plugin, calls, sourceDoc } = templatePluginFixture({ outcome: 'generation-failure' });
 	const result = await plugin.ensureGranolaTemplateForDocument(sourceDoc, authContext());
 
-	assert.ok(calls.includes('deletePanel'));
+	assert.equal(calls.includes('deletePanel'), false);
 	assert.equal(result, sourceDoc);
 	assert.equal(plugin.templateManagementStats.failed, 1);
 });
 
 test('cleanup failure preserves the non-blocking generation failure outcome', async () => {
-	const { plugin, logs } = templatePluginFixture({ outcome: 'generation-and-cleanup-failure' });
+	const emptyCreatedPanel = { id: 'panel-1', template_slug: 'template-1', content: '' };
+	const { plugin, logs } = templatePluginFixture({
+		outcome: 'generation-and-cleanup-failure',
+		panelSnapshots: [[], [emptyCreatedPanel]],
+	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 
 	assert.equal(plugin.templateManagementStats.failed, 1);
@@ -282,22 +364,133 @@ test('existing template panel skips native generation', async () => {
 	assert.equal(plugin.templateManagementStats.skipped, 1);
 });
 
+test('embedded populated template panel skips the private panel check', async () => {
+	const embeddedPanel = {
+		id: 'panel-embedded',
+		template_slug: 'template-1',
+		content: { type: 'doc', content: [{ type: 'heading' }] },
+	};
+	const { plugin, calls } = templatePluginFixture();
+	const result = await plugin.ensureGranolaTemplateForDocument({
+		id: 'doc-1',
+		title: 'Testing',
+		panels: [embeddedPanel],
+	}, authContext());
+
+	assert.equal(result.privatePanels[0], embeddedPanel);
+	assert.deepEqual(calls, []);
+	assert.equal(plugin.templateManagementStats.skipped, 1);
+});
+
+test('processDocument limits a sync run to one generated panel and defers the next missing template', async () => {
+	const fixture = templatePluginFixture();
+	const rewrites = [];
+	Object.assign(fixture.plugin, extractMethod('processDocument'), {
+		templateManagementGenerationBudget: 1,
+		settings: {
+			...fixture.plugin.settings,
+			includeEnhancedNotes: true,
+			includeMyNotes: false,
+			storeTranscriptInSeparateNote: false,
+		},
+		currentSyncFileIndex: null,
+		findExistingNoteByGranolaId: async () => ({ path: 'Meeting.md' }),
+		getExistingNoteBehavior: () => 'changed',
+		isNoteOutdated: async (_file, doc) => doc.updated_at === '2026-07-17T21:07:05.566Z',
+		getEnhancedNotesMarkdown: () => 'Summary',
+		shouldFetchTranscript: () => false,
+		getMyNotesMarkdown: () => '',
+		extractAttendeeNames: () => [],
+		generateAttendeeTags: () => [],
+		extractFolderNames: () => [],
+		generateFolderTags: () => [],
+		generateGranolaUrl: () => 'https://example.invalid',
+		buildFrontmatter: () => '---\n---\n',
+		buildNoteContent: () => '# Meeting',
+		registerGranolaFileIndexEntry: () => {},
+		app: { vault: { process: async (_file, writer) => rewrites.push(writer()) } },
+	});
+
+	await fixture.plugin.processDocument({ id: 'doc-1', title: 'First', updated_at: 'before' }, authContext());
+	await fixture.plugin.processDocument({ id: 'doc-2', title: 'Second', updated_at: 'before' }, authContext());
+
+	assert.equal(fixture.plugin.templateManagementGenerationBudget, 0);
+	assert.equal(rewrites.length, 1);
+	assert.equal(fixture.plugin.templateManagementStats.applied, 1);
+	assert.equal(fixture.plugin.templateManagementStats.failed, 0);
+	assert.equal(fixture.plugin.templateManagementStats.deferred, 1);
+});
+
 test('manual template generation sends auto false', async () => {
 	const { plugin, getGenerateOptions } = templatePluginFixture({ source: 'manual' });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
 	assert.equal(getGenerateOptions().auto, false);
 });
 
-test('verification failure deletes the new panel', async () => {
+test('verification failure preserves the new panel when a re-fetch cannot confirm emptiness', async () => {
 	const { plugin, calls } = templatePluginFixture({ outcome: 'verification-failure' });
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.deepEqual(calls.slice(-2), ['waitForPanel', 'deletePanel']);
+	assert.deepEqual(calls.slice(-2), ['waitForPanel', 'getPanels']);
+	assert.equal(calls.includes('deletePanel'), false);
 });
 
-test('refresh failure deletes the new panel', async () => {
-	const { plugin, calls } = templatePluginFixture({ outcome: 'refresh-failure' });
+test('refresh failure preserves a verified populated panel and advances the document timestamp', async () => {
+	const { plugin, calls, persistedPanel } = templatePluginFixture({ outcome: 'refresh-failure' });
+	const result = await plugin.ensureGranolaTemplateForDocument({
+		id: 'doc-1',
+		title: 'Testing',
+		updated_at: 'before',
+	}, authContext());
+
+	assert.equal(calls.includes('deletePanel'), false);
+	assert.equal(result.privatePanels[0], persistedPanel);
+	assert.equal(result.updated_at, persistedPanel.content_updated_at);
+	assert.equal(plugin.templateManagementStats.applied, 1);
+});
+
+test('an older document refresh cannot regress the verified panel timestamp', async () => {
+	const { plugin, persistedPanel } = templatePluginFixture({ outcome: 'refresh-stale' });
+	const result = await plugin.ensureGranolaTemplateForDocument({
+		id: 'doc-1',
+		title: 'Testing',
+		updated_at: '2026-07-17T18:07:05.566Z',
+	}, authContext());
+
+	assert.equal(result.updated_at, persistedPanel.content_updated_at);
+});
+
+test('generation failure cleanup deletes only a re-fetched definitely empty plugin panel', async () => {
+	const emptyCreatedPanel = {
+		id: 'panel-1',
+		template_slug: 'template-1',
+		content: '',
+		created_at: new Date().toISOString(),
+	};
+	const { plugin, calls } = templatePluginFixture({
+		outcome: 'generation-failure',
+		panelSnapshots: [[], [emptyCreatedPanel]],
+	});
+
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.deepEqual(calls.slice(-2), ['refreshDocument', 'deletePanel']);
+
+	assert.deepEqual(calls.slice(-3), ['generate', 'getPanels', 'deletePanel']);
+});
+
+test('generation failure cleanup preserves an ambiguous or populated plugin panel', async () => {
+	const populatedCreatedPanel = {
+		id: 'panel-1',
+		template_slug: 'template-1',
+		content_updated_at: '2026-07-17T20:07:05.566Z',
+		content: { type: 'doc', content: [{ type: 'heading' }] },
+	};
+	const { plugin, calls } = templatePluginFixture({
+		outcome: 'generation-failure',
+		panelSnapshots: [[], [populatedCreatedPanel]],
+	});
+
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+
+	assert.equal(calls.includes('deletePanel'), false);
 });
 
 test('ambiguous create cleanup deletes one newly appearing empty panel', async () => {
@@ -405,6 +598,22 @@ test('a timestamp-less empty matching panel is deferred instead of ready', async
 	assert.deepEqual(calls, ['getPanels']);
 	assert.equal(plugin.templateManagementStats.deferred, 1);
 	assert.equal(plugin.templateManagementStats.skipped, 0);
+});
+
+test('an exhausted generation budget defers without deleting a stale empty panel', async () => {
+	const emptyPanel = {
+		id: 'panel-stale',
+		template_slug: 'template-1',
+		content: '',
+		created_at: new Date(Date.now() - (11 * 60 * 1000)).toISOString(),
+	};
+	const { plugin, calls } = templatePluginFixture({ panelSnapshots: [[emptyPanel]] });
+	plugin.templateManagementGenerationBudget = 0;
+
+	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
+
+	assert.deepEqual(calls, ['getPanels']);
+	assert.equal(plugin.templateManagementStats.deferred, 1);
 });
 
 test('template summaries distinguish deferred panels from ready panels', () => {
