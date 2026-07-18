@@ -29,10 +29,12 @@ An Obsidian plugin that automatically syncs your [Granola AI](https://granola.ai
 - **✨ Rich Metadata**: Includes a canonical `date` property plus Granola source timestamps and IDs
 - **🧩 Metadata Mapping**: Map Granola's inline metadata block into frontmatter fields like `org`, `people`, `topics`, and `meeting_type`
 - **🔗 Metadata Templates**: Format mapped org and people values with templates such as `[[Reference/{name}]]`
+- **🩹 Summary Markdown Repair**: Automatically normalize malformed one-line Granola summary markdown before metadata extraction and note writing
 - **✅ Review Task**: Optionally add a review task near the top of each synced meeting note
 - **📋 Content Conversion**: Converts ProseMirror content to clean Markdown
 - **📄 Separate Transcript Notes**: Store transcripts in their own notes instead of embedding them inline
 - **🧪 Granola Template Management**: Automatically ensure a selected Granola template exists before sync using private Granola APIs
+- **🔐 WorkOS Session Compatibility**: Refreshes newer Granola WorkOS sessions before sync so document fetch keeps working with current desktop auth behavior
 - **🔄 Update Handling**: Intelligently updates existing notes instead of creating duplicates
 - **🔍 Duplicate Detection**: Find and review duplicate notes with the "Find Duplicate Granola Notes" command
 - **📝 Existing Note Modes**: Choose whether existing notes are never updated, updated only when Granola changed, or always rewritten
@@ -72,6 +74,17 @@ Path to your fallback Granola authentication file. Default locations:
 - **Windows**: `AppData/Roaming/Granola/supabase.json`
 
 The plugin automatically detects your operating system and sets the appropriate default path. For newer Granola installs, the plugin will also automatically check `stored-accounts.json` first when available.
+
+### Granola Authentication Compatibility
+
+Newer Granola desktop builds use a WorkOS-style session model instead of relying on one long-lived token file.
+
+Current plugin behavior:
+- The plugin checks `stored-accounts.json` first when present, then falls back to the configured `supabase.json` path
+- Before sync, it refreshes the selected WorkOS session through Granola's current `refresh-access-token` flow
+- Sync then uses the refreshed access token for document fetches and the rest of the Granola API calls
+
+This means the plugin is compatible with newer Granola auth behavior without requiring Granola to rewrite fresh bearer tokens to disk before every sync.
 
 ### Filename Template
 Customize how your notes are named using these variables:
@@ -170,6 +183,7 @@ Map Granola's inline `### Metadata` block into structured frontmatter fields for
 - **Structured properties**: Turn machine-generated metadata into first-class Obsidian properties
 - **Reference-friendly**: Point `org` and `people` directly at linked reference notes
 - **Cleaner note bodies**: Remove the raw metadata JSON block after extraction
+- **More resilient imports**: Repair malformed one-line summary markdown so metadata extraction and section formatting still work
 
 ### My Notes
 
@@ -224,14 +238,25 @@ Automatically ensure a selected Granola template exists in Granola before the pl
 - **Granola Template**: Select the Granola template to enforce before sync
 
 #### Behavior:
-- The plugin checks whether the selected template already exists on each Granola note
-- If the selected template is missing, the plugin generates it in Granola first and then continues normal sync
+- For `Update when Granola changed`, the plugin checks template presence before deciding that an existing Obsidian note is already current, so a missing template can recover without another Granola edit
+- Populated matching panels embedded in Granola's normal document response make the ready path cheap; missing or ambiguous candidates receive a private panel check
+- `Never update existing notes` remains absolute: existing notes skip Template Management and all other update work
+- If the selected template is missing, the plugin creates a panel and asks Granola's native Yjs-backed `generate-summary` flow to populate it
+- Each sync run generates at most one new panel; additional missing candidates continue normal sync/skip behavior and are reported as `template-deferred` for later runs
+- Every Template Management generation request sends Granola `auto: false`, including a scheduled sync; the configured plugin scheduler remains automatic, while this private flag controls Granola background-generation eligibility
+- Before importing, the plugin verifies that the generated panel has persisted structured content, including persisted document nodes
 - If the selected template already exists, the plugin leaves it alone
+- A verified populated panel is preserved if the final document refresh fails. After generation or verification failure, the plugin deletes its created panel only when a private re-fetch proves that exact panel is active and empty; ambiguous or populated panels are preserved for safety
+- Empty matching panels with reliable timestamps are protected as potentially in progress until they are at least 10 minutes old, then become eligible for cleanup before a retry; timestamp-less or invalid-timestamp panels remain `template-deferred` until Granola supplies a reliable timestamp or an operator resolves them
+- Deferred panels are visible in sync diagnostics as `template-deferred` (for example, `1 template-deferred`)
 - If template management fails, the plugin logs the failure and continues syncing the note with whatever Granola content is currently available
 
 #### Notes:
 - This feature is experimental and fork-specific
 - It uses private Granola APIs and may break if Granola changes their internal endpoints
+- Generation is delegated to Granola's native flow rather than writing generated Markdown directly into a panel
+- Live validation found that native generation succeeds with `auto: false`, while scheduled-plugin and sanitized direct probes using `auto: true` received HTTP 409; failure diagnostics record only a numeric HTTP status or `unknown`, never response content
+- For compatibility, malformed-summary normalization remains a narrow read-time repair for selected-template, enhanced-notes, and last-viewed-panel Markdown when it matches the existing malformed-summary predicates; it is not a fallback writeback path
 - It is designed to recover richer summary output automatically, especially when a note was initially created without your preferred template
 
 ### Auto-Sync Frequency
@@ -489,10 +514,11 @@ Your converted meeting content appears here in clean Markdown format.
 
 ### Authentication Issues
 - Make sure Granola desktop app is logged in
-- Check that the auth key file exists at the expected location:
+- Check that Granola auth files exist at the expected locations:
+  - **macOS**: `~/Library/Application Support/Granola/stored-accounts.json`
   - **macOS**: `~/Library/Application Support/Granola/supabase.json`
   - **Windows**: `C:\Users\[USERNAME]\AppData\Roaming\Granola\supabase.json`
-- If the file is in a different location, update the "Auth Key Path" in plugin settings
+- If `supabase.json` is in a different location, update the "Auth Key Path" in plugin settings
 - Try logging out and back in to Granola
 
 ### File Naming Issues
