@@ -505,14 +505,14 @@ test('generation failure cleanup preserves an ambiguous or populated plugin pane
 	assert.equal(calls.includes('deletePanel'), false);
 });
 
-test('ambiguous create cleanup deletes one newly appearing empty panel', async () => {
+test('ambiguous create preserves one newly appearing empty panel without an owned ID', async () => {
 	const recoveredPanel = { id: 'panel-recovered', template_slug: 'template-1', content: '' };
 	const { plugin, calls } = templatePluginFixture({
 		outcome: 'create-throws',
 		panelSnapshots: [[], [recoveredPanel]],
 	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'getPanels', 'deletePanel']);
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel']);
 });
 
 test('ambiguous create leaves multiple new panels untouched', async () => {
@@ -524,7 +524,7 @@ test('ambiguous create leaves multiple new panels untouched', async () => {
 		]],
 	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.equal(calls.includes('deletePanel'), false);
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel']);
 });
 
 test('ambiguous create leaves a newly appearing populated panel untouched', async () => {
@@ -538,8 +538,7 @@ test('ambiguous create leaves a newly appearing populated panel untouched', asyn
 		panelSnapshots: [[], [populatedPanel]],
 	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel', 'getPanels']);
-	assert.equal(calls.includes('deletePanel'), false);
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel']);
 });
 
 test('ambiguous create does not delete an empty panel beside a concurrent populated panel', async () => {
@@ -555,7 +554,7 @@ test('ambiguous create does not delete an empty panel beside a concurrent popula
 		]],
 	});
 	await plugin.ensureGranolaTemplateForDocument({ id: 'doc-1', title: 'Testing' }, authContext());
-	assert.equal(calls.includes('deletePanel'), false);
+	assert.deepEqual(calls, ['getPanels', 'getContext', 'createPanel']);
 });
 
 test('a recent empty matching panel is treated as in progress without creating a duplicate', async () => {

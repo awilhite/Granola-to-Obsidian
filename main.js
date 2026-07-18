@@ -2553,12 +2553,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			});
 			const existingPanels = await client.getDocumentPanels(doc.id);
 			doc.privatePanels = Array.isArray(existingPanels) ? existingPanels : [];
-			const baselineActiveMatchingPanelIds = new Set(
-				doc.privatePanels
-					.filter(isActiveMatchingTemplatePanel)
-					.map((panel) => panel.id)
-					.filter(Boolean)
-			);
 			const existingTemplatePanel = doc.privatePanels.find(hasPersistedTemplateContent);
 			if (existingTemplatePanel) {
 				this.templateManagementStats.skipped++;
@@ -2642,11 +2636,9 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 			});
 
 			let createdPanelId = null;
-			let creationAttempted = false;
 			let failedStage = 'create';
 			try {
 				const creationStartedAt = Date.now();
-				creationAttempted = true;
 				const createdPanel = await client.createDocumentPanel(
 					doc.id,
 					selectedTemplate.id,
@@ -2724,18 +2716,6 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						}
 					} catch (recoveryError) {
 						logStageFailure('cleanup-check');
-					}
-				} else if (creationAttempted) {
-					try {
-						const recoveredPanels = await client.getDocumentPanels(doc.id);
-						const newlyAppearingPanels = (Array.isArray(recoveredPanels) ? recoveredPanels : [])
-							.filter(isActiveMatchingTemplatePanel)
-							.filter((panel) => panel.id && !baselineActiveMatchingPanelIds.has(panel.id));
-						if (newlyAppearingPanels.length === 1 && !hasPersistedTemplateContent(newlyAppearingPanels[0])) {
-							await deletePanelBestEffort(newlyAppearingPanels[0].id, 'create-recovery');
-						}
-					} catch (recoveryError) {
-						logStageFailure('create-recovery');
 					}
 				}
 				throw error;
