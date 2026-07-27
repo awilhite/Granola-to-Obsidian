@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 - **📅 Canonical note date**: Synced notes now include a `date` property derived from the meeting date for better Obsidian Bases and table compatibility
 - **📝 My Notes fallback**: When Granola's public feed does not include a `my_notes` panel, the plugin now falls back to private document fields like `notes_markdown` so your authored notes still appear in the `## My Notes` section
 - **✍️ My Notes rendering**: Authored notes now prefer Granola's structured `notes` document so paragraph spacing more closely matches the `My notes` view in Granola
+- **Stale meeting recovery**: Records left at `meeting_end_count: 0` can sync after the settling window when transcription has stopped and a private check confirms a populated panel or transcript; actively transcribing records retain a six-hour stale-state safeguard
 
 ## [1.9.3] - 2026-02-15
 ### Changed

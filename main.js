@@ -74,6 +74,7 @@ const GRANOLA_GENERATION_POLL_ATTEMPTS = 5;
 const GRANOLA_GENERATION_POLL_DELAY_MS = 1500;
 const GRANOLA_GENERATION_STALE_PANEL_AGE_MS = 10 * 60 * 1000;
 const POST_MEETING_SYNC_DELAY_MS = 2 * 60 * 1000;
+const STALE_IN_PROGRESS_MEETING_AGE_MS = 6 * 60 * 60 * 1000;
 const MAX_SYNC_DIAGNOSTIC_HISTORY = 10;
 
 function safeJsonParse(value, fallback = null) {
@@ -1245,11 +1246,16 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 						currentDocTitle: '',
 						currentPhase: 'Syncing',
 					});
-					const readiness = this.getDocumentSyncReadiness(doc);
+					const readiness = await this.resolveDocumentSyncReadiness(doc, authContext);
 					if (!readiness.ready) {
 						this.activeSyncDiagnostics.docsSkippedNotReady++;
 						console.log('Skipping document "' + (doc.title || doc.id) + '" - ' + readiness.reason);
 						continue;
+					}
+					if (readiness.recoveredStaleMeeting) {
+						console.log(
+							'Recovering stale Granola meeting state evidence=' + readiness.completionEvidence
+						);
 					}
 
 					const success = await this.processDocument(doc, authContext);
@@ -2434,6 +2440,75 @@ class GranolaSyncPlugin extends obsidian.Plugin {
 		}
 
 		return { ready: true, reason: '' };
+	}
+
+	async resolveDocumentSyncReadiness(doc, authContext) {
+		const readiness = this.getDocumentSyncReadiness(doc);
+		if (readiness.ready || doc.meeting_end_count !== 0) {
+			return readiness;
+		}
+
+		const lastActivityTime = new Date(doc.updated_at || doc.created_at || 0).getTime();
+		const ageMs = Date.now() - lastActivityTime;
+		const stoppedAndSettled = doc.transcribe === false && ageMs >= POST_MEETING_SYNC_DELAY_MS;
+		const staleInProgressState = ageMs >= STALE_IN_PROGRESS_MEETING_AGE_MS;
+		if (!Number.isFinite(lastActivityTime) || (!stoppedAndSettled && !staleInProgressState)) {
+			return readiness;
+		}
+
+		const hasPersistedContent = (panel) => Boolean(
+			panel &&
+				!panel.deleted_at &&
+				panel.was_trashed !== true &&
+				typeof panel.template_slug === 'string' &&
+				panel.template_slug.length > 0 &&
+				(
+					(typeof panel.content === 'string' && panel.content.trim().length > 0) ||
+					(
+						panel.content &&
+						panel.content.type === 'doc' &&
+						Array.isArray(panel.content.content) &&
+						panel.content.content.some((node) =>
+							node &&
+							typeof node === 'object' &&
+							typeof node.type === 'string' &&
+							node.type.length > 0
+						)
+					)
+				)
+		);
+
+		try {
+			const client = this.getGranolaPrivateClient(authContext);
+			const panels = await client.getDocumentPanels(doc.id, { includeYdocState: true });
+			const populatedPanel = (Array.isArray(panels) ? panels : []).find(hasPersistedContent);
+			if (populatedPanel) {
+				doc.privatePanels = panels;
+				return {
+					ready: true,
+					reason: '',
+					recoveredStaleMeeting: true,
+					completionEvidence: 'panel',
+				};
+			}
+
+			if (stoppedAndSettled) {
+				const transcript = await client.getDocumentTranscript(doc.id);
+				if (Array.isArray(transcript) && transcript.length > 0) {
+					return {
+						ready: true,
+						reason: '',
+						recoveredStaleMeeting: true,
+						completionEvidence: 'transcript',
+					};
+				}
+			}
+		} catch (error) {
+			const status = Number.isInteger(error?.status) ? error.status : 'unknown';
+			console.error('Granola stale meeting verification status=failed httpStatus=' + status);
+		}
+
+		return readiness;
 	}
 
 	async ensureGranolaTemplateForDocument(doc, authContext) {
